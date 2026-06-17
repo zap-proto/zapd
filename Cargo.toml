@@ -30,6 +30,9 @@ directories = "5"
 # browser boundary) + base64 for the opaque payload. Everything else is binary.
 serde_json = "1"
 base64 = "0.22"
+# flock(2) for the single-instance spawn lock (serialize unlink+bind so racing
+# routers can't both win on a stale socket). Tiny, already a transitive dep.
+libc = "0.2"
 
 [profile.release]
 lto = true
