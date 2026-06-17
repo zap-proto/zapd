@@ -38,9 +38,16 @@ struct Peer {
     role: u8,
     brand: String,
     caps: Vec<String>,
+    /// Per-connection generation token. On disconnect a peer removes its own
+    /// registry entry only if the entry is still its own — so a faster reconnect
+    /// that already replaced it (same id) is never clobbered.
+    token: u64,
 }
 
 type Registry = Arc<Mutex<HashMap<String, Peer>>>;
+
+/// Monotonic per-connection token source (see `Peer::token`).
+static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Resolve the brand-neutral router socket path.
 ///
@@ -181,27 +188,25 @@ async fn handle(stream: UnixStream, registry: Registry) -> Result<()> {
     }
     let (role, brand, caps) = frame::decode_hello(&hello.payload)?;
 
-    // 2) Register, with a per-connection writer pump.
+    // 2) Register, last-writer-wins. A reconnecting provider with the same id
+    //    (e.g. a browser that relaunched its native host) takes over rather than
+    //    being rejected as a "duplicate" — otherwise a stale entry wedges the id
+    //    forever and the live extension can never register (providers.list=0).
+    //    Evicting the old peer drops its tx, ending its writer pump.
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let duplicate = {
+    let token = NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let evicted = {
         // Scope the guard so it is never held across an await (it is !Send).
         let mut reg = registry.lock().unwrap();
-        if reg.contains_key(&id) {
-            true
-        } else {
-            reg.insert(
-                id.clone(),
-                Peer { tx: tx.clone(), role, brand: brand.clone(), caps },
-            );
-            false
-        }
+        reg.insert(
+            id.clone(),
+            Peer { tx: tx.clone(), role, brand: brand.clone(), caps, token },
+        )
     };
-    if duplicate {
-        let _ = wr
-            .write_all(&Frame::new(frame::ERROR, "zapd", &id, b"id_in_use".to_vec()).encode())
-            .await;
-        return Err(Error::new(ErrorKind::AddrInUse, format!("duplicate id {id}")));
+    if evicted.is_some() {
+        tracing::info!("zapd: {id} reconnected — replaced stale peer");
     }
+    drop(evicted); // old peer's tx drops → its writer pump ends
     tracing::info!("zapd: {id} online (role={role}, brand={brand})");
 
     let writer = tokio::spawn(async move {
@@ -218,10 +223,22 @@ async fn handle(stream: UnixStream, registry: Registry) -> Result<()> {
     // 3) Relay until EOF/error.
     let result = route_loop(&mut rd, &registry, &id).await;
 
-    // 4) Presence: remove + announce departure.
-    registry.lock().unwrap().remove(&id);
-    broadcast(&registry, &id, frame::PEER_DISCONNECTED, frame::encode_peer(&id));
-    tracing::info!("zapd: {id} offline");
+    // 4) Presence: remove + announce departure — but only if this connection is
+    //    still the registered one. A faster reconnect may have already replaced
+    //    us under the same id; don't clobber the live peer.
+    let was_current = {
+        let mut reg = registry.lock().unwrap();
+        if reg.get(&id).map(|p| p.token) == Some(token) {
+            reg.remove(&id);
+            true
+        } else {
+            false
+        }
+    };
+    if was_current {
+        broadcast(&registry, &id, frame::PEER_DISCONNECTED, frame::encode_peer(&id));
+        tracing::info!("zapd: {id} offline");
+    }
     writer.abort();
     result
 }
