@@ -7,7 +7,7 @@
   "os": ["darwin", "linux"],
   "cpu": ["x64", "arm64"],
   "files": ["bin/zapd.js", "install.js"],
-  "repository": { "type": "git", "url": "github:zap-proto/zapd" },
+  "repository": { "type": "git", "url": "git+https://github.com/zap-proto/zapd.git" },
   "homepage": "https://github.com/zap-proto/zapd",
   "keywords": ["zap", "zapd", "router", "broker", "native-messaging", "rpc"],
   "license": "MIT OR Apache-2.0"
