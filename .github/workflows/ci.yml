@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,        target: aarch64-apple-darwin }       # arm64 native
+          - { os: macos-13,        target: x86_64-apple-darwin }        # amd64 native
+          - { os: ubuntu-latest,   target: x86_64-unknown-linux-musl }  # amd64 native
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl } # arm64 native, no QEMU
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - name: musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+      - run: cargo test --target ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: e2e router + native-host (python)
+        run: |
+          export ZAP_SOCK=/tmp/zapd-ci.sock
+          ./target/${{ matrix.target }}/release/zapd --log warn &
+          sleep 1
+          python3 tests/e2e.py "$ZAP_SOCK"

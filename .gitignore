@@ -1,0 +1,3 @@
+/target
+*.log
+npm/bin/zapd
