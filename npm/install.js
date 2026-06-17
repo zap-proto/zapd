@@ -39,8 +39,24 @@ function download(u, dest, cb) {
 
 console.log(`[zapd] downloading ${target} v${VERSION}`);
 download(url, tarPath, () => {
-  execFileSync('tar', ['-xzf', tarPath, '-C', binDir]);
+  // ATOMIC install: never overwrite the live binary in place. A running zapd
+  // (browser native host, or the router) holds the inode; extracting over it
+  // mid-exec yields a corrupt/partial binary → ETXTBSY crash-loop. Stage to a
+  // temp dir, chmod, verify it runs, then rename() over the path — atomic on
+  // macOS/Linux; existing processes keep the old inode, new launches get the new.
+  const stageDir = fs.mkdtempSync(path.join(binDir, '.stage-'));
+  execFileSync('tar', ['-xzf', tarPath, '-C', stageDir]);
   fs.unlinkSync(tarPath);
-  fs.chmodSync(path.join(binDir, 'zapd'), 0o755);
-  console.log('[zapd] installed bin/zapd');
+  const staged = path.join(stageDir, 'zapd');
+  fs.chmodSync(staged, 0o755);
+  try {
+    execFileSync(staged, ['--version'], { stdio: 'ignore' });
+  } catch (e) {
+    console.error('[zapd] staged binary failed --version; aborting install (not swapping in a bad binary)');
+    fs.rmSync(stageDir, { recursive: true, force: true });
+    process.exit(1);
+  }
+  fs.renameSync(staged, path.join(binDir, 'zapd'));
+  fs.rmSync(stageDir, { recursive: true, force: true });
+  console.log('[zapd] installed bin/zapd (atomic)');
 });
