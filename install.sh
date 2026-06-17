@@ -27,7 +27,14 @@ mkdir -p "$dest"
 echo "zapd: installing $target -> $dest"
 tmp=$(mktemp -d)
 curl -fsSL "$url" | tar -xz -C "$tmp"
-install -m 0755 "$tmp/zapd" "$dest/zapd"
+# ATOMIC install: stage into $dest, verify it runs, then rename() over the path.
+# Overwriting a running zapd in place corrupts it (ETXTBSY) and crash-loops the
+# browser native host. rename() is atomic on one filesystem; live processes keep
+# the old inode, new launches get the new binary. Never `cp`/`install` in place.
+staged="$dest/.zapd.new.$$"
+install -m 0755 "$tmp/zapd" "$staged"
+"$staged" --version >/dev/null 2>&1 || { echo "zapd: staged binary failed --version, aborting (not swapping in a bad binary)"; rm -f "$staged"; rm -rf "$tmp"; exit 1; }
+mv -f "$staged" "$dest/zapd"
 rm -rf "$tmp"
 echo "zapd: installed $("$dest/zapd" --version 2>/dev/null || echo "$dest/zapd")"
 case ":$PATH:" in *":$dest:"*) ;; *) echo "zapd: add $dest to your PATH" ;; esac

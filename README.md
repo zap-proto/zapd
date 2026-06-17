@@ -82,19 +82,25 @@ byte-identical) → response → presence-on-disconnect.
 ## Install
 
 ```sh
-# curl | sh (macOS/Linux, arm64/amd64 — native binary, no build)
+# curl | sh (macOS/Linux, arm64/amd64 — native binary, no build, atomic install)
 curl -fsSL https://raw.githubusercontent.com/zap-proto/zapd/main/install.sh | sh
 
-# or npm (brand wrapper over the same canonical binary)
-npm i -g @hanzo/zapd
+# or npm (downloads the same canonical binary)
+npm i -g @zap-proto/zapd
 ```
 
-Run it once per login (it self-binds the shared socket; everything shares it):
+You don't start it. zapd is **spawned on demand** (LSP / gpg-agent / tmux style):
+the first client that needs it — a browser native host (`connectNative`) or
+hanzo-mcp — connect-or-spawns the router, which binds `~/.zap/run/zapd.sock`. The
+socket bind **is** the single-instance guard: exactly one router per user, no
+daemon manager required. Racing spawns all but one exit cleanly on `AddrInUse`.
+
+Optional supervision (NOT required — only to pin it at boot):
 
 ```sh
-# macOS
+# macOS (optional)
 cp dist/zap.zapd.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/zap.zapd.plist
-# Linux
+# Linux (optional)
 mkdir -p ~/.config/systemd/user && cp dist/zapd.service ~/.config/systemd/user/ && systemctl --user enable --now zapd
 ```
 
