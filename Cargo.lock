@@ -694,6 +694,7 @@ dependencies = [
  "base64",
  "clap",
  "directories",
+ "libc",
  "serde_json",
  "tokio",
  "tracing",

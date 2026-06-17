@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -81,6 +81,22 @@ async fn bind(path: &Path) -> Result<UnixListener> {
         }
     }
 
+    // Single-instance guard under concurrent spawns: serialize connect-check +
+    // unlink-stale + bind behind an advisory lock. Without it, two routers racing
+    // on a *stale* socket both unlink it and both bind() → one orphaned (split
+    // brain, providers split across routers — the exact thing we observed). Held
+    // only across the bind; once a router owns the live socket, that socket is
+    // the guard and the lock drops.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    // SAFETY: flock(LOCK_EX) on a valid fd; blocks until this process wins it.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
     if path.exists() {
         match UnixStream::connect(path).await {
             Ok(_) => {
@@ -97,6 +113,14 @@ async fn bind(path: &Path) -> Result<UnixListener> {
     }
 
     let listener = UnixListener::bind(path)?;
+    // User-only socket. The 0700 parent dir already gates access; this is
+    // belt-and-braces so the control plane is never world/group reachable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    drop(lock); // release the spawn lock — the bound socket is now the guard
     tracing::info!("zapd: listening on {}", path.display());
     Ok(listener)
 }
