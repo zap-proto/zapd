@@ -1,0 +1,30 @@
+[package]
+name = "zapd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "ZAP universal router — the one shared local broker every ZAP service connects to"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zap-proto/zapd"
+keywords = ["zap", "capnproto", "router", "broker", "rpc"]
+categories = ["network-programming"]
+
+[[bin]]
+name = "zapd"
+path = "src/main.rs"
+
+[dependencies]
+# The universal router is schema-agnostic: it never parses a payload, so it
+# depends on NO ZAP schema crate and — deliberately — NO capnp. It moves
+# opaque ZAP frames between nodes on std::io + tokio alone. The ZAP wire/RPC
+# (our fork) lives end-to-end between providers and consumers, above the router.
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+directories = "5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
