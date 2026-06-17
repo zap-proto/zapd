@@ -13,10 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,        target: aarch64-apple-darwin }       # arm64 native
-          - { os: macos-13,        target: x86_64-apple-darwin }        # amd64 native
-          - { os: ubuntu-latest,   target: x86_64-unknown-linux-musl }  # amd64 native
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl } # arm64 native, no QEMU
+          - { os: macos-14,         target: aarch64-apple-darwin,       run: true }   # arm64 native
+          - { os: macos-14,         target: x86_64-apple-darwin,        run: false }  # native cross-compile (LLVM, no QEMU)
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  run: true }   # amd64 native
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, run: true }   # arm64 native
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,9 +27,11 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo clippy --target ${{ matrix.target }} -- -D warnings
-      - run: cargo test --target ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
+      - if: matrix.run
+        run: cargo test --target ${{ matrix.target }}
       - name: e2e router + native-host (python)
+        if: matrix.run
         run: |
           export ZAP_SOCK=/tmp/zapd-ci.sock
           ./target/${{ matrix.target }}/release/zapd --log warn &
