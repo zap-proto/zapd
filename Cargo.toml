@@ -1,6 +1,6 @@
 [package]
 name = "zapd"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.81"
 description = "ZAP universal router — the one shared local broker every ZAP service connects to"
@@ -9,6 +9,9 @@ repository = "https://github.com/zap-proto/zapd"
 keywords = ["zap", "capnproto", "router", "broker", "rpc"]
 categories = ["network-programming"]
 
+# ONE binary. Router by default; native-messaging host when a browser launches
+# it (or `zapd host`). Decomplected into modules (frame / broker / host), not
+# into separate artifacts.
 [[bin]]
 name = "zapd"
 path = "src/main.rs"
@@ -23,6 +26,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 directories = "5"
+# Native-messaging host mode: the Chrome-forced JSON inch (the only JSON, at the
+# browser boundary) + base64 for the opaque payload. Everything else is binary.
+serde_json = "1"
+base64 = "0.22"
 
 [profile.release]
 lto = true
