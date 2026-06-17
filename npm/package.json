@@ -1,0 +1,13 @@
+{
+  "name": "@hanzo/zapd",
+  "version": "0.1.0",
+  "description": "ZAP universal router — the one shared local broker every ZAP service connects to. Brand wrapper over the canonical zap-proto/zapd binary.",
+  "bin": { "zapd": "bin/zapd.js" },
+  "scripts": { "postinstall": "node install.js" },
+  "os": ["darwin", "linux"],
+  "cpu": ["x64", "arm64"],
+  "files": ["bin/zapd.js", "install.js"],
+  "repository": { "type": "git", "url": "github:zap-proto/zapd" },
+  "homepage": "https://hanzo.ai/zap",
+  "license": "MIT OR Apache-2.0"
+}

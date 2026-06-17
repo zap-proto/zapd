@@ -1,0 +1,19 @@
+# systemd user service: one zapd per user login, always up, self-binds the
+# shared socket $XDG_RUNTIME_DIR/zap/zapd.sock. Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp dist/zapd.service ~/.config/systemd/user/
+#   systemctl --user enable --now zapd
+#
+# For true socket activation, pair with a zapd.socket unit (ListenStream=…)
+# and set ZAP_LISTEN_FD=3; otherwise zapd self-binds, which is fine.
+[Unit]
+Description=ZAP universal router (zapd) — the one shared local broker
+After=default.target
+
+[Service]
+ExecStart=%h/.local/bin/zapd --log info
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
