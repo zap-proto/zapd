@@ -6,7 +6,7 @@ rust-version = "1.81"
 description = "ZAP universal router — the one shared local broker every ZAP service connects to"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/zap-proto/zapd"
-keywords = ["zap", "capnproto", "router", "broker", "rpc"]
+keywords = ["zap", "zapd", "router", "broker", "rpc"]
 categories = ["network-programming"]
 
 # ONE binary. Router by default; native-messaging host when a browser launches
