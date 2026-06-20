@@ -1,6 +1,6 @@
 [package]
 name = "zapd"
-version = "0.1.1"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.81"
 description = "ZAP universal router — the one shared local broker every ZAP service connects to"
