@@ -98,6 +98,7 @@ async fn bind(path: &Path) -> Result<UnixListener> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false) // lock file: never truncate — we only need the fd for flock
         .open(path.with_extension("lock"))?;
     // SAFETY: flock(LOCK_EX) on a valid fd; blocks until this process wins it.
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
