@@ -49,13 +49,20 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // A browser launched us as its native host — it passes the extension origin
-    // as an arg. Detect BEFORE clap (clap would reject it), and never log to
-    // stdout here (stdout IS the native-messaging channel).
-    if std::env::args()
-        .skip(1)
-        .any(|a| a.starts_with("chrome-extension://") || a.starts_with("moz-extension://"))
-    {
+    // A browser launched us as its native host. Detect BEFORE clap (clap would
+    // reject the browser-supplied args), and never log to stdout here (stdout IS
+    // the native-messaging channel). Detection must cover both browser families:
+    //   • Chrome/Chromium pass the extension ORIGIN (chrome-extension://<id>/).
+    //   • Firefox 55+ passes the native-messaging MANIFEST PATH as argv[1] plus
+    //     the bare add-on ID (e.g. "hanzo-ai@hanzo.ai") — NO extension:// scheme.
+    // Both browsers always pass the manifest path first; keying on the manifest
+    // filename catches every engine and stays brand/host agnostic.
+    if std::env::args().skip(1).any(|a| {
+        a.starts_with("chrome-extension://")
+            || a.starts_with("moz-extension://")
+            || a.ends_with(".zap.json")                     // native-host manifest path (any brand)
+            || (a.contains('@') && !a.contains('/') && !a.contains(' ')) // Firefox add-on id
+    }) {
         return host::run().await;
     }
 
