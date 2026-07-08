@@ -1,16 +1,16 @@
 //! `zapd` native-messaging host mode — pure Rust, folded into the one binary.
 //!
 //! Browsers spawn this over stdio (native messaging: uint32-LE length + UTF-8
-//! JSON — the single platform-forced JSON inch). It connect-or-spawns `zapd`
-//! and relays 1:1 between the browser's JSON frames and the binary ZAP envelope
-//! on the router socket. No Python, no wrapper, no install: the same `zapd`
-//! binary is the router (no args) and the host (launched by the browser).
+//! JSON — the single platform-forced JSON inch). It CONNECTS to an existing
+//! `zapd` router and relays 1:1 between the browser's JSON frames and the binary
+//! ZAP envelope on the router socket. The same `zapd` binary is the router (no
+//! args) and the host — but the host never *starts* the router: that is the MCP
+//! client's job, so the browser can't spin up services. No router ⇒ exit.
 //!
 //! Fail-fast: if either side drops, the process exits so the extension's
-//! reconnect respawns a clean host (which connect-or-spawns the router again).
+//! reconnect gets a clean host once a consumer is present.
 
-use std::io::{Error, ErrorKind, Result};
-use std::time::Duration;
+use std::io::{ErrorKind, Result};
 
 use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -43,31 +43,12 @@ fn stamp_device(typ: u8, from: &str, host: &str) -> String {
     from.to_string()
 }
 
-/// Connect to zapd; if absent, spawn it (this same binary, router mode) and wait.
-async fn connect_or_spawn() -> Result<UnixStream> {
-    let path = crate::broker::socket_path();
-    if let Ok(s) = UnixStream::connect(&path).await {
-        return Ok(s);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cmd = std::process::Command::new(exe);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0); // detach so it outlives this host
-        }
-        let _ = cmd.spawn();
-    }
-    for _ in 0..60 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(s) = UnixStream::connect(&path).await {
-            return Ok(s);
-        }
-    }
-    Err(Error::new(ErrorKind::NotConnected, "zapd unreachable"))
+/// Connect to an already-running router. The host NEVER spawns it: the router's
+/// lifecycle belongs to the MCP client, not the browser — a browser-launched
+/// process must not start background services. No router ⇒ Err, the host exits
+/// cleanly, and the extension backs off until a consumer brings zapd up.
+async fn connect_router() -> Result<UnixStream> {
+    UnixStream::connect(crate::broker::socket_path()).await
 }
 
 /// Read one native-messaging frame from stdin: u32-LE length + JSON.
@@ -93,7 +74,7 @@ async fn nm_write<W: AsyncWriteExt + Unpin>(w: &mut W, v: &serde_json::Value) ->
 }
 
 pub async fn run() -> Result<()> {
-    let zsock = connect_or_spawn().await?;
+    let zsock = connect_router().await?;
     let (mut zr, mut zw) = zsock.into_split();
     let host = hostname();
 
