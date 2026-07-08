@@ -48,6 +48,11 @@ fn chrome_dirs() -> Vec<PathBuf> {
         ".config/microsoft-edge",
         ".config/vivaldi",
         ".config/opera",
+        // snap Chromium (Ubuntu) confines its config under ~/snap/<pkg>/common.
+        "snap/chromium/common/chromium",
+        // Flatpak Chromium/Chrome keep their own per-app HOME under ~/.var/app.
+        ".var/app/org.chromium.Chromium/config/chromium",
+        ".var/app/com.google.Chrome/config/google-chrome",
     ];
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let bases: [&str; 0] = [];
@@ -58,12 +63,26 @@ fn chrome_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-fn firefox_dir() -> PathBuf {
+/// Firefox native-messaging dirs. Return ALL candidates and let the caller keep
+/// the ones whose parent exists — a machine may run standard, snap, and Flatpak
+/// Firefox at once, and each confines its profile to a different HOME. The snap
+/// path in particular is the Ubuntu default, where `~/.mozilla` never exists —
+/// omitting it is why `install-host` used to write 0 manifests there.
+fn firefox_dirs() -> Vec<PathBuf> {
     let h = home();
     #[cfg(target_os = "macos")]
-    return h.join("Library/Application Support/Mozilla/NativeMessagingHosts");
+    let bases = ["Library/Application Support/Mozilla/NativeMessagingHosts"];
     #[cfg(not(target_os = "macos"))]
-    return h.join(".mozilla/native-messaging-hosts");
+    let bases = [
+        ".mozilla/native-messaging-hosts",
+        "snap/firefox/common/.mozilla/native-messaging-hosts",
+        ".var/app/org.mozilla.firefox/.mozilla/native-messaging-hosts",
+    ];
+    bases
+        .iter()
+        .map(|b| h.join(b))
+        .filter(|d| d.parent().map(|p| p.exists()).unwrap_or(false))
+        .collect()
 }
 
 pub fn run(brand: &str) -> Result<()> {
@@ -92,11 +111,11 @@ pub fn run(brand: &str) -> Result<()> {
             "name": name, "description": desc, "path": exe, "type": "stdio",
             "allowed_extensions": [firefox_id],
         });
-        let dir = firefox_dir();
-        if dir.parent().map(|p| p.exists()).unwrap_or(false) {
+        let bytes = serde_json::to_vec_pretty(&body)?;
+        for dir in firefox_dirs() {
             std::fs::create_dir_all(&dir)?;
             let path = dir.join(format!("{name}.json"));
-            std::fs::write(&path, serde_json::to_vec_pretty(&body)?)?;
+            std::fs::write(&path, &bytes)?;
             println!("wrote {}", path.display());
             wrote += 1;
         }
