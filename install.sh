@@ -73,3 +73,59 @@ install -m 0755 "$tmp/zapd" "$staged"
 mv -f "$staged" "$dest/zapd"
 echo "zapd: installed $("$dest/zapd" --version 2>/dev/null || echo "$dest/zapd") (sha256 verified)"
 case ":$PATH:" in *":$dest:"*) ;; *) echo "zapd: add $dest to your PATH" ;; esac
+
+# ── Auto-start: one shared zapd per login, no manual step ────────────────────
+# Every ZAP client (browser native host, hanzo-mcp, any SDK) needs the router
+# up. Wire the OS to keep EXACTLY ONE per user — systemd on Linux, launchd on
+# macOS — so users never learn zapd exists. Best-effort and idempotent: a
+# missing service manager is not fatal (clients also self-spawn zapd on demand,
+# and the singleton bind guarantees only one ever wins the socket). Units are
+# embedded here, not read from a checkout, so `curl … | sh` is fully wired.
+case "$os" in
+  Linux)
+    if command -v systemctl >/dev/null 2>&1; then
+      ud="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"; mkdir -p "$ud"
+      cat > "$ud/zapd.service" <<EOF
+[Unit]
+Description=ZAP universal router (zapd) — the one shared local broker
+After=default.target
+
+[Service]
+ExecStart=$dest/zapd --log info
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+      systemctl --user daemon-reload 2>/dev/null || true
+      if systemctl --user enable --now zapd 2>/dev/null; then
+        echo "zapd: systemd user service enabled (always-on singleton router)"
+      fi
+    fi
+    ;;
+  Darwin)
+    la="$HOME/Library/LaunchAgents"; mkdir -p "$la"
+    cat > "$la/zap.zapd.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>zap.zapd</string>
+  <key>ProgramArguments</key><array><string>$dest/zapd</string><string>--log</string><string>info</string></array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+EOF
+    launchctl unload "$la/zap.zapd.plist" 2>/dev/null || true
+    if launchctl load "$la/zap.zapd.plist" 2>/dev/null; then
+      echo "zapd: launchd agent loaded (always-on singleton router)"
+    fi
+    ;;
+esac
+
+# Register the browser native-messaging host (idempotent) so Chrome/Firefox
+# extensions can launch the host with zero extra steps.
+if "$dest/zapd" install-host >/dev/null 2>&1; then
+  echo "zapd: browser native-messaging host registered"
+fi
+echo "zapd: ready — the router is up and self-heals; nothing else to do."
