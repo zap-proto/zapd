@@ -49,6 +49,8 @@ fn chrome_dirs() -> Vec<PathBuf> {
         ".config/vivaldi",
         ".config/opera",
         // snap Chromium (Ubuntu) confines its config under ~/snap/<pkg>/common.
+        // Its snap layout nests the profile under `chromium/`, so the hosts dir
+        // is `.../common/chromium/NativeMessagingHosts` (the join below completes it).
         "snap/chromium/common/chromium",
         // Flatpak Chromium/Chrome keep their own per-app HOME under ~/.var/app.
         ".var/app/org.chromium.Chromium/config/chromium",
@@ -63,11 +65,12 @@ fn chrome_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Firefox native-messaging dirs. Return ALL candidates and let the caller keep
-/// the ones whose parent exists — a machine may run standard, snap, and Flatpak
+/// Firefox native-messaging dirs. Return ALL candidates UNFILTERED and let the
+/// caller decide which to write — a machine may run standard, snap, and Flatpak
 /// Firefox at once, and each confines its profile to a different HOME. The snap
 /// path in particular is the Ubuntu default, where `~/.mozilla` never exists —
-/// omitting it is why `install-host` used to write 0 manifests there.
+/// omitting it (or filtering it out here on the immediate parent) is why
+/// `install-host` used to write 0 manifests there.
 fn firefox_dirs() -> Vec<PathBuf> {
     let h = home();
     #[cfg(target_os = "macos")]
@@ -78,11 +81,7 @@ fn firefox_dirs() -> Vec<PathBuf> {
         "snap/firefox/common/.mozilla/native-messaging-hosts",
         ".var/app/org.mozilla.firefox/.mozilla/native-messaging-hosts",
     ];
-    bases
-        .iter()
-        .map(|b| h.join(b))
-        .filter(|d| d.parent().map(|p| p.exists()).unwrap_or(false))
-        .collect()
+    bases.iter().map(|b| h.join(b)).collect()
 }
 
 pub fn run(brand: &str) -> Result<()> {
@@ -112,12 +111,25 @@ pub fn run(brand: &str) -> Result<()> {
             "allowed_extensions": [firefox_id],
         });
         let bytes = serde_json::to_vec_pretty(&body)?;
+        // A snap Firefox creates `~/snap/firefox` but not the nested
+        // `common/.mozilla/native-messaging-hosts` chain, so gate on the snap
+        // ROOT existing (`~/snap/firefox`) rather than the immediate parent —
+        // otherwise the snap manifest is silently skipped on a fresh profile.
+        // Non-snap trees (standard `~/.mozilla`, Flatpak `~/.var/app/...`) still
+        // gate on their immediate parent existing.
         for dir in firefox_dirs() {
-            std::fs::create_dir_all(&dir)?;
-            let path = dir.join(format!("{name}.json"));
-            std::fs::write(&path, &bytes)?;
-            println!("wrote {}", path.display());
-            wrote += 1;
+            let install = if dir.starts_with(home().join("snap")) {
+                home().join("snap/firefox").exists()
+            } else {
+                dir.parent().map(|p| p.exists()).unwrap_or(false)
+            };
+            if install {
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join(format!("{name}.json"));
+                std::fs::write(&path, &bytes)?;
+                println!("wrote {}", path.display());
+                wrote += 1;
+            }
         }
     }
     println!("zapd install-host: {wrote} manifest(s) → {}", exe.display());
