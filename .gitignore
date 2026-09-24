@@ -1,3 +1,8 @@
 /target
 *.log
 npm/bin/zapd
+
+# Local symlinks to LLM.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
