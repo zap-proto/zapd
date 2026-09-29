@@ -38,6 +38,7 @@ fn embed() {
         .unwrap_or_else(|_| "zapd=info".into());
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_ansi(false)
         .with_env_filter(filter)
         .try_init();
     zapd::embed();
