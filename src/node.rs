@@ -6,6 +6,10 @@
 //! node reconnects (50 ms doubling to 1 s) and registers again under the same
 //! id. Hosts never write a reconnect loop of their own.
 //!
+//! A node talks only to the process that holds the router lock: it checks the
+//! socket's peer credentials against the lock, so a socket some other process
+//! bound at the path is refused and retried.
+//!
 //! Calls are one at a time per node, matched by the responder's `from`:
 //! correlation lives in the payload's schema, not the envelope, so the node
 //! does not interleave two calls it could not tell apart.
@@ -141,6 +145,14 @@ impl Node {
 
 /// One connection's life: HELLO, WELCOME, then answers until it drops.
 async fn session(s: UnixStream, hello: &[u8], inner: &Inner) -> Result<()> {
+    // Talk only to the process that holds the router lock.
+    let peer = s.peer_cred()?.pid().map(|p| p as u32);
+    if peer.is_none() || peer != crate::elect::holder() {
+        return Err(Error::new(
+            ErrorKind::ConnectionRefused,
+            "the socket is not served by the router lock holder",
+        ));
+    }
     let (mut rd, mut wr) = s.into_split();
     wr.write_all(hello).await?;
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();

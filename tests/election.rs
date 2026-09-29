@@ -62,6 +62,17 @@ fn desc(role: u8, brand: &str, caps: &[String]) -> frame::Descriptor {
     }
 }
 
+/// A node with no candidacy: joins, asks for the registry once, reports.
+#[test]
+#[ignore = "run by the election tests as a child process"]
+fn bystander() {
+    let me = zapd::Node::join("cli/bystander", frame::ROLE_CONSUMER, "", &[]);
+    match zapd::block_on(me.nodes(Duration::from_secs(2))) {
+        Ok(_) => println!("joined"),
+        Err(_) => println!("refused"),
+    }
+}
+
 struct Home {
     dir: PathBuf,
     pairing: Pairing,
@@ -508,4 +519,41 @@ async fn door_refuses_strangers() {
     assert!(Frame::read(&mut s).await.unwrap().is_none());
     a.kill().unwrap();
     a.wait().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_socket_the_lock_holder_does_not_serve_is_never_spoken_to() {
+    // Something binds the socket path without holding the router lock — an
+    // older daemon left running, say. A node must not say HELLO to it.
+    let home = Home::new("rogue");
+    std::fs::create_dir_all(home.sock().parent().unwrap()).unwrap();
+    let rogue = tokio::net::UnixListener::bind(home.sock()).unwrap();
+    let heard = tokio::spawn(async move {
+        let mut bytes = 0;
+        while let Ok(Ok((mut c, _))) =
+            tokio::time::timeout(Duration::from_secs(4), rogue.accept()).await
+        {
+            let mut buf = Vec::new();
+            bytes += tokio::io::AsyncReadExt::read_to_end(&mut c, &mut buf)
+                .await
+                .unwrap_or(0);
+        }
+        bytes
+    });
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "bystander",
+            "--ignored",
+            "--nocapture",
+            "--quiet",
+        ])
+        .env("XDG_RUNTIME_DIR", home.dir.join("run"))
+        .env("XDG_STATE_HOME", home.dir.join("state"))
+        .env("HOME", &home.dir)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("refused"), "{said}");
+    assert_eq!(heard.await.unwrap(), 0, "the rogue socket heard a frame");
 }

@@ -25,7 +25,8 @@ use std::io::{Error, Result};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::net::{TcpListener, UnixListener};
@@ -61,20 +62,19 @@ pub fn embed() {
             .spawn(|| {
                 let rt = crate::runtime();
                 loop {
-                    let lock = match wait() {
-                        Ok(lock) => lock,
-                        Err(e) => {
-                            tracing::error!("zapd: cannot take the router lock: {e}");
-                            std::thread::sleep(Duration::from_secs(1));
-                            continue;
-                        }
-                    };
+                    if let Err(e) = lock(libc::F_SETLKW, libc::F_WRLCK) {
+                        tracing::error!("zapd: cannot take the router lock: {e}");
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                    ELECTED.store(true, Ordering::SeqCst);
                     tracing::info!("zapd: elected router (pid {})", std::process::id());
                     if let Err(e) = rt.block_on(serve()) {
                         tracing::error!("zapd: router failed: {e}");
                     }
                     // Resign so another process can try; then stand again.
-                    drop(lock);
+                    ELECTED.store(false, Ordering::SeqCst);
+                    let _ = lock(libc::F_SETLK, libc::F_UNLCK);
                     std::thread::sleep(Duration::from_secs(1));
                 }
             })
@@ -82,10 +82,39 @@ pub fn embed() {
     });
 }
 
-/// Block until this process holds the router lock. Returns the open file; the
-/// lock lives exactly as long as it does (and the process).
-fn wait() -> Result<File> {
+/// This process holds the router lock.
+static ELECTED: AtomicBool = AtomicBool::new(false);
+
+/// The pid of this user's router, or `None` if nobody holds the lock. A node
+/// talks only to the process this names (it checks the socket's peer), so a
+/// process that binds the socket path without holding the lock — an older
+/// daemon left running, say — is never mistaken for the router.
+pub fn holder() -> Option<u32> {
+    if ELECTED.load(Ordering::SeqCst) {
+        return Some(std::process::id());
+    }
+    // SAFETY: a zeroed flock struct is valid; F_GETLK fills it in.
+    let mut l: libc::flock = unsafe { std::mem::zeroed() };
+    l.l_type = libc::F_WRLCK as _;
+    l.l_whence = libc::SEEK_SET as _;
+    let fd = lock_fd().ok()?;
+    // SAFETY: fcntl(F_GETLK) on a valid fd with a valid flock struct.
+    let ok = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut l) } == 0;
+    (ok && l.l_type != libc::F_UNLCK as _).then_some(l.l_pid as u32)
+}
+
+/// One open descriptor on `<runtime>/zapd.lock` per process, never closed.
+/// POSIX drops all of a process's record locks on a file when ANY descriptor
+/// of it closes, so opening the file afresh to ask who holds it would release
+/// the lock this very process holds.
+fn lock_fd() -> Result<std::os::unix::io::RawFd> {
+    static FILES: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
     let dir = runtime_dir();
+    let path = dir.join("zapd.lock");
+    let mut files = FILES.lock().unwrap();
+    if let Some((_, f)) = files.iter().find(|(p, _)| *p == path) {
+        return Ok(f.as_raw_fd());
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -96,15 +125,23 @@ fn wait() -> Result<File> {
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(dir.join("zapd.lock"))?;
-    // SAFETY: a zeroed flock struct is valid; we set the fields F_SETLKW reads.
+        .open(&path)?;
+    let fd = f.as_raw_fd();
+    files.push((path, f));
+    Ok(fd)
+}
+
+/// Take (`F_SETLKW`, blocking) or drop (`F_UNLCK`) the whole-file write lock.
+fn lock(cmd: libc::c_int, kind: libc::c_int) -> Result<()> {
+    let fd = lock_fd()?;
+    // SAFETY: a zeroed flock struct is valid; we set the fields fcntl reads.
     let mut l: libc::flock = unsafe { std::mem::zeroed() };
-    l.l_type = libc::F_WRLCK as _;
+    l.l_type = kind as _;
     l.l_whence = libc::SEEK_SET as _;
     loop {
-        // SAFETY: fcntl(F_SETLKW) on a valid fd with a valid flock struct.
-        if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_SETLKW, &l) } == 0 {
-            return Ok(f);
+        // SAFETY: fcntl on a valid fd with a valid flock struct.
+        if unsafe { libc::fcntl(fd, cmd, &l) } == 0 {
+            return Ok(());
         }
         let e = Error::last_os_error();
         if e.raw_os_error() != Some(libc::EINTR) {
