@@ -15,11 +15,11 @@
 //! `0700` directory the user owns; before every read both are `lstat`ed, and a
 //! symlink, a foreign owner or any group or other permission bit refuses the
 //! door (the UDS still serves) rather than trusting a token someone else could
-//! read or plant. A missing file is minted — this user's [`port`], a token from
-//! the OS CSPRNG — and linked into place, so a racing reader never sees half a
-//! file; deleting it rotates the token. Every door connection reads it afresh.
-//! The port in the file is the one the router binds, so a user whose default
-//! port is taken edits the file and pairs again.
+//! read or plant. A missing file is minted — a port nothing holds at that
+//! moment ([`free_port`]), a token from the OS CSPRNG — and linked into place,
+//! so a racing reader never sees half a file; deleting it re-mints both. Every
+//! door connection reads it afresh. The port in the file is the one the router
+//! binds; if something else takes it later, `zapd pair --reset` picks another.
 //!
 //! **The proof** is HMAC-SHA256 under the token, fresh nonces from both sides,
 //! router first:
@@ -96,12 +96,21 @@ impl Pairing {
     }
 }
 
-/// This user's door port: 20000 + uid mod 10000. Below every OS's ephemeral
-/// range, and distinct for any two users on one machine, so two users' routers
-/// never contend for one port and never elect each other.
-pub fn port() -> u16 {
-    // SAFETY: getuid(2) cannot fail.
-    20000 + (unsafe { libc::getuid() } % 10000) as u16
+/// A door port for a new pairing: one in 20000–29999 — below every OS's
+/// ephemeral range — that nothing on this machine holds now. It is written
+/// into the pairing, which is what the router binds from then on.
+pub fn free_port() -> Result<u16> {
+    for _ in 0..100 {
+        let r = random()?;
+        let p = 20000 + (u16::from_le_bytes([r[0], r[1]]) % 10000);
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return Ok(p);
+        }
+    }
+    Err(Error::new(
+        ErrorKind::AddrInUse,
+        "zapd: no free door port in 20000-29999",
+    ))
 }
 
 /// `<state>/zap/pair`.
@@ -129,7 +138,7 @@ pub fn load() -> Result<Pairing> {
             let _ = publish(
                 &p,
                 &Pairing {
-                    port: port(),
+                    port: free_port()?,
                     key: random()?,
                 },
                 false,
@@ -140,15 +149,15 @@ pub fn load() -> Result<Pairing> {
     }
 }
 
-/// Mint a new token on the same port. Every paired browser must pair again;
+/// Mint a new token on a new free port. Every paired browser must pair again;
 /// the door re-reads the file on every connection, so the old token stops
-/// working at once.
+/// working at once, and the next router elected binds the new port.
 pub fn reset() -> Result<Pairing> {
-    let port = load()?.port;
+    load()?;
     publish(
         &path(),
         &Pairing {
-            port,
+            port: free_port()?,
             key: random()?,
         },
         true,
@@ -291,8 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn port_is_per_user_and_below_ephemeral() {
-        assert!((20000..30000).contains(&port()));
+    fn a_new_door_port_is_free_and_below_ephemeral() {
+        let p = free_port().unwrap();
+        assert!((20000..30000).contains(&p));
+        assert!(std::net::TcpListener::bind(("127.0.0.1", p)).is_ok());
     }
 
     #[test]

@@ -73,6 +73,9 @@ fn bystander() {
     }
 }
 
+/// `F_UNLCK` as `flock::l_type` holds it on every OS (it is a short on some).
+const UNLOCKED: libc::c_short = libc::F_UNLCK as _;
+
 struct Home {
     dir: PathBuf,
     pairing: Pairing,
@@ -132,8 +135,7 @@ impl Home {
         let mut l: libc::flock = unsafe { std::mem::zeroed() };
         l.l_type = libc::F_WRLCK as _;
         l.l_whence = libc::SEEK_SET as _;
-        (unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETLK, &mut l) } == 0
-            && l.l_type != libc::F_UNLCK as _)
+        (unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETLK, &mut l) } == 0 && l.l_type != UNLOCKED)
             .then_some(l.l_pid)
     }
 }
@@ -267,7 +269,9 @@ async fn ws_next(ws: &mut Ws) -> Option<Frame> {
 
 /// What the extension does: prove the pairing (checking the router's proof
 /// first), then register as a browser. Returns the id the router assigned.
-async fn browser(port: u16, key: &Pairing) -> Option<(Ws, String)> {
+/// What the extension does: prove the pairing, checking the router's proof
+/// first. Returns the socket, ready for HELLO.
+async fn paired(port: u16, key: &Pairing) -> Option<Ws> {
     let mut ws = ws_open(port, CHROME).await.ok()?;
     let nc = pair::nonce().unwrap();
     ws_send(&mut ws, Frame::new(frame::AUTH, "", "", nc.to_vec())).await;
@@ -287,18 +291,29 @@ async fn browser(port: u16, key: &Pairing) -> Option<(Ws, String)> {
         ),
     )
     .await;
+    Some(ws)
+}
+
+/// Say HELLO as `id` on a paired socket; the router's first answer.
+async fn hello_as(ws: &mut Ws, id: &str) -> Option<Frame> {
     let caps = ["browser.navigate".to_string()];
     ws_send(
-        &mut ws,
+        ws,
         Frame::new(
             frame::HELLO,
-            "browser/test-3fa2",
+            id,
             "",
             frame::encode_hello(&desc(frame::ROLE_PROVIDER, "hanzo", &caps)),
         ),
     )
     .await;
-    let welcome = ws_next(&mut ws).await?;
+    ws_next(ws).await
+}
+
+/// A paired browser, registered. Returns the id the router assigned.
+async fn browser(port: u16, key: &Pairing) -> Option<(Ws, String)> {
+    let mut ws = paired(port, key).await?;
+    let welcome = hello_as(&mut ws, "browser/test-3fa2").await?;
     assert_eq!(welcome.typ, frame::WELCOME);
     Some((ws, welcome.to))
 }
@@ -556,4 +571,128 @@ async fn a_socket_the_lock_holder_does_not_serve_is_never_spoken_to() {
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(said.contains("refused"), "{said}");
     assert_eq!(heard.await.unwrap(), 0, "the rogue socket heard a frame");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_door_admits_browsers_only_and_they_take_no_id() {
+    let home = Home::new("kinds");
+    let mut a = home.spawn();
+    let port = home.pairing.port;
+    let sock = home.sock();
+    let mut me = until("the socket", || {
+        Uds::join(&sock, "cli/me", frame::ROLE_CONSUMER)
+    })
+    .await;
+
+    // A door context that says it is an engine is refused and closed: it can
+    // never become a node other nodes send their requests to.
+    let mut w = paired(port, &home.pairing).await.unwrap();
+    let no = hello_as(&mut w, "engine/qwen3").await.unwrap();
+    assert_eq!(
+        (no.typ, no.payload),
+        (frame::ERROR, b"browser_only:engine/qwen3".to_vec())
+    );
+    assert!(ws_next(&mut w).await.is_none());
+    // Nor can it claim a registered node's id to evict it.
+    let mut w = paired(port, &home.pairing).await.unwrap();
+    assert_eq!(hello_as(&mut w, "cli/me").await.unwrap().typ, frame::ERROR);
+    me.listed(&[me_id(), cand(a.id())]).await;
+
+    // A browser id already registered is not taken over by another context.
+    let (mut first, id) = browser(port, &home.pairing).await.unwrap();
+    let mut second = paired(port, &home.pairing).await.unwrap();
+    let no = hello_as(&mut second, "browser/test-3fa2").await.unwrap();
+    assert_eq!(
+        (no.typ, no.payload),
+        (frame::ERROR, format!("taken:{id}").into_bytes())
+    );
+    me.send(Frame::new(frame::ROUTE, "", &id, b"still you?".to_vec()))
+        .await;
+    let got = loop {
+        let f = ws_next(&mut first).await.unwrap();
+        if f.typ == frame::ROUTE {
+            break f;
+        }
+    };
+    assert_eq!(got.payload, b"still you?".to_vec());
+    a.kill().unwrap();
+    a.wait().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flood_at_the_door_holds_few_descriptors() {
+    let home = Home::new("flood");
+    let mut a = home.spawn();
+    let port = home.pairing.port;
+    until("the door", || async {
+        TcpStream::connect(("127.0.0.1", port)).await.ok()
+    })
+    .await;
+    let fds = |pid: u32| {
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    };
+    let before = fds(a.id());
+    // 200 sockets that upgrade and then say nothing — no token, no proof.
+    let mut held = Vec::new();
+    for _ in 0..200 {
+        if let Ok(ws) = ws_open(port, CHROME).await {
+            held.push(ws);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let during = fds(a.id());
+    assert!(
+        during <= before + 24,
+        "fds {before} -> {during} under a flood"
+    );
+    // The window is short: once it passes, a real browser is admitted.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(browser(port, &home.pairing).await.is_some());
+    drop(held);
+    a.kill().unwrap();
+    a.wait().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_dir_that_is_not_this_users_is_never_used() {
+    // Planted as a symlink: the router never locks, binds or listens in it.
+    let home = Home::new("planted");
+    let elsewhere = home.dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.dir.join("run/zap")).unwrap();
+    let mut a = home.spawn();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
+        "the router wrote into a planted directory"
+    );
+    a.kill().unwrap();
+    a.wait().unwrap();
+
+    // Left open to others by this user: tightened to 0700, then used.
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("loose");
+    std::fs::create_dir_all(home.dir.join("run/zap")).unwrap();
+    std::fs::set_permissions(
+        home.dir.join("run/zap"),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    let mut a = home.spawn();
+    let sock = home.sock();
+    until("the socket", || {
+        Uds::join(&sock, "cli/me", frame::ROLE_CONSUMER)
+    })
+    .await;
+    let mode = std::fs::metadata(home.dir.join("run/zap"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
+    a.kill().unwrap();
+    a.wait().unwrap();
 }

@@ -6,11 +6,14 @@ Full docs: **README.md**. Design: HIP-0069 (hanzoai/hips).
   `zapd::embed()` (router candidacy) and `zapd::Node::join()` (its own seat).
   An `fcntl` lock on `<runtime>/zapd.lock` elects one router per user login;
   its exit hands the seat to the next candidate. Doors: `<runtime>/zapd.sock`
-  (0600) and the browser WebSocket on `127.0.0.1:20000+uid%10000`.
+  (0600) and the browser WebSocket on the port the pairing names (picked free
+  at mint, 20000–29999). The runtime dir is validated (`private_runtime`)
+  before anything locks, binds or connects in it.
 - **Modules:** `frame` (envelope, + `AUTH=8`), `id` (`<kind>/<host>/<name>`,
   host stamped by the router), `router` (registry + route + presence;
   transport-free), `elect` (lock, doors, the one runtime thread), `door`
-  (Origin/Host check, pairing proof, browsers never originate), `pair` (the
+  (Origin/Host check, pairing proof, browser-only HELLO, no id take-over,
+  browsers never originate, eight admissions at a time), `pair` (the
   code file `<state>/zap/pair`, 0600, lstat-checked), `node` (a process's seat;
   reconnects 50 ms→1 s; one call at a time, matched by responder `from`; talks
   only to a socket whose peer pid is the lock holder).

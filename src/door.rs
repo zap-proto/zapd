@@ -18,15 +18,24 @@
 //!
 //! After both, the browser is one more node: its frames — the ZAP router
 //! envelope, one per WebSocket binary message — are piped into `router::handle`
-//! exactly as a UDS stream would be, except that a browser may only address the
-//! router or answer a call (`originates`), and 60 s of silence closes it.
+//! exactly as a UDS stream would be, except that
+//!   * its HELLO must name a `browser/…` id, and may not take over an id that
+//!     is registered — a door context can never become, or evict, an engine,
+//!     an agent or any other node;
+//!   * it may only address the router or answer a call (`originates`);
+//!   * 60 s of silence closes it.
+//!
+//! Admission is bounded: eight connections at most are between accept and
+//! HELLO at any time, each for at most 2 s, and a message is at most 16 MiB.
 
 use std::io::{Error, ErrorKind, Result};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -34,6 +43,7 @@ use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::frame::{self, Frame};
+use crate::id;
 use crate::pair::{self, Pairing};
 use crate::router::{self, Registry};
 
@@ -46,20 +56,35 @@ const BLINK: &[&str] = &[
 /// Per-install random origins; the pairing proof authenticates these.
 const RANDOM: &[&str] = &["moz-extension://", "safari-web-extension://"];
 
-/// How long a connection has to finish the upgrade and the proof.
-const ADMIT: Duration = Duration::from_secs(5);
+/// How long a connection has to finish the upgrade and the proof, and then to
+/// say HELLO.
+const ADMIT: Duration = Duration::from_secs(2);
+
+/// At most this many connections are being admitted at once. A connection
+/// past it is closed on accept, so a flood of unauthenticated sockets holds a
+/// bounded number of descriptors and tasks; a real browser retries.
+const ADMITTING: usize = 8;
+
+/// The largest message a browser sends: a reply carrying a capture, which the
+/// extension shrinks before it sends. Also the ceiling before the proof.
+const MAX_MESSAGE: usize = 16 << 20;
 
 /// A paired browser that sends nothing for this long is gone. The extension
 /// probes every 20 s, which is also what keeps an MV3 service worker alive.
 const IDLE: Duration = Duration::from_secs(60);
 
 pub async fn serve(listener: TcpListener, port: u16, registry: Registry) {
+    let gate = Arc::new(Semaphore::new(ADMITTING));
     loop {
         match listener.accept().await {
             Ok((tcp, _)) => {
+                let Ok(permit) = gate.clone().try_acquire_owned() else {
+                    tracing::debug!("zapd: door busy admitting; closed a connection");
+                    continue;
+                };
                 let registry = registry.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = admit(tcp, port, registry).await {
+                    if let Err(e) = admit(tcp, port, registry, permit).await {
                         tracing::info!("zapd: door refused: {e}");
                     }
                 });
@@ -91,10 +116,15 @@ pub fn check(
     }
 }
 
-async fn admit(tcp: TcpStream, port: u16, registry: Registry) -> Result<()> {
+async fn admit(
+    tcp: TcpStream,
+    port: u16,
+    registry: Registry,
+    permit: OwnedSemaphorePermit,
+) -> Result<()> {
     let config = WebSocketConfig::default()
-        .max_message_size(Some(frame::MAX_FRAME as usize + 4))
-        .max_frame_size(Some(frame::MAX_FRAME as usize + 4));
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
     // The Err type is tungstenite's upgrade-callback contract, not ours to shrink.
     #[allow(clippy::result_large_err)]
     let callback =
@@ -109,24 +139,28 @@ async fn admit(tcp: TcpStream, port: u16, registry: Registry) -> Result<()> {
                 }
             }
         };
-    let mut ws = tokio::time::timeout(ADMIT, async {
+    let (mut ws, hello) = tokio::time::timeout(ADMIT, async {
         let mut ws = tokio_tungstenite::accept_hdr_async_with_config(tcp, callback, Some(config))
             .await
             .map_err(|e| Error::new(ErrorKind::PermissionDenied, e.to_string()))?;
         prove(&mut ws).await?;
-        Ok::<_, Error>(ws)
+        let hello = browser_hello(&mut ws).await?;
+        Ok::<_, Error>((ws, hello))
     })
     .await
     .map_err(|_| Error::new(ErrorKind::TimedOut, "admission timed out"))??;
+    drop(permit);
 
-    // Paired. Pipe the socket into the router as one more node.
+    // Paired, and a browser. Pipe the socket into the router as one more
+    // node — one that may never take over a registered id.
     let (ours, theirs) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
-        if let Err(e) = router::handle(theirs, registry).await {
+        if let Err(e) = router::handle(theirs, registry, false).await {
             tracing::debug!("zapd: browser ended: {e}");
         }
     });
     let (mut rd, mut wr) = tokio::io::split(ours);
+    wr.write_all(&hello).await?;
     let mut quiet = Box::pin(tokio::time::sleep(IDLE));
     loop {
         tokio::select! {
@@ -159,6 +193,29 @@ async fn admit(tcp: TcpStream, port: u16, registry: Registry) -> Result<()> {
 /// dev session — is refused.
 fn originates(f: &Frame) -> bool {
     !f.to.is_empty() && f.typ != frame::RESPONSE
+}
+
+/// The first frame after the proof: a HELLO as a browser, and nothing else. A
+/// door context can only ever be a browser node — never an engine, an agent or
+/// a dev session that other nodes would send their requests to.
+async fn browser_hello(ws: &mut WebSocketStream<TcpStream>) -> Result<Vec<u8>> {
+    let refused = |why: &str| Error::new(ErrorKind::PermissionDenied, format!("door: {why}"));
+    let b = match ws.next().await {
+        Some(Ok(Message::Binary(b))) => b,
+        _ => return Err(refused("expected HELLO")),
+    };
+    let f = Frame::decode(&b)?;
+    if f.typ != frame::HELLO || id::kind(&f.from) != "browser" {
+        let no = Frame::new(
+            frame::ERROR,
+            "zapd",
+            "",
+            format!("browser_only:{}", f.from).into_bytes(),
+        );
+        let _ = ws.send(Message::Binary(Bytes::from(no.encode()))).await;
+        return Err(refused("only browser nodes come through the door"));
+    }
+    Ok(b.to_vec())
 }
 
 /// The pairing proof, router side. The key is re-read per connection, so a

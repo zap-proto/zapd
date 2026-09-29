@@ -60,7 +60,12 @@ impl Registry {
 static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Serve one node: require `hello`, register, then relay frames until it goes.
-pub async fn handle<S>(stream: S, registry: Registry) -> Result<()>
+///
+/// `take_over` says whether a `hello` may replace a live node of the same id.
+/// On the UDS it may — every process there is this user's, and a node that
+/// reconnects after a router takeover must get its id back at once. Through
+/// the browser door it may not: a browser can never evict a registered node.
+pub async fn handle<S>(stream: S, registry: Registry, take_over: bool) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -88,15 +93,29 @@ where
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (evict, mut evicted_rx) = oneshot::channel();
     let token = NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let evicted = registry.peers.lock().unwrap().insert(
-        id.clone(),
-        Peer {
-            tx: tx.clone(),
-            desc,
-            token,
-            evict,
-        },
-    );
+    // Check and insert under one lock, so two racing hellos cannot both pass.
+    let registered = {
+        let mut peers = registry.peers.lock().unwrap();
+        if !take_over && peers.contains_key(&id) {
+            None
+        } else {
+            Some(peers.insert(
+                id.clone(),
+                Peer {
+                    tx: tx.clone(),
+                    desc,
+                    token,
+                    evict,
+                },
+            ))
+        }
+    };
+    let Some(evicted) = registered else {
+        let why = format!("taken:{id}");
+        wr.write_all(&Frame::new(frame::ERROR, "zapd", "", why.clone().into_bytes()).encode())
+            .await?;
+        return Err(Error::new(ErrorKind::AddrInUse, why));
+    };
     if let Some(old) = evicted {
         let _ = old.evict.send(());
         tracing::info!("zapd: {id} reconnected — replaced stale peer");

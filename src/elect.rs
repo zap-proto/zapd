@@ -22,7 +22,7 @@
 
 use std::fs::File;
 use std::io::{Error, Result};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +51,35 @@ pub fn socket_path() -> PathBuf {
     runtime_dir().join("zapd.sock")
 }
 
+/// The runtime directory, made and kept private: created `0700` if missing;
+/// refused if it is a symlink or another user's; tightened to `0700` if this
+/// user made it looser. Everything that locks, binds or connects in it goes
+/// through here, so a directory someone else planted is never trusted.
+pub(crate) fn private_runtime() -> Result<PathBuf> {
+    let dir = runtime_dir();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    let m = std::fs::symlink_metadata(&dir)?;
+    // SAFETY: getuid(2) cannot fail.
+    let me = unsafe { libc::getuid() };
+    if !m.file_type().is_dir() || m.uid() != me {
+        return Err(Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "zapd: {} must be a directory owned by uid {me}",
+                dir.display()
+            ),
+        ));
+    }
+    if m.mode() & 0o077 != 0 {
+        tracing::warn!("zapd: {} was open to others; made it 0700", dir.display());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
 /// Join the election in the background and return at once. The first call in
 /// a process starts one thread with its own runtime, so a host needs no async
 /// runtime of its own and no knowledge of ours; later calls are no-ops.
@@ -62,7 +91,7 @@ pub fn embed() {
             .spawn(|| {
                 let rt = crate::runtime();
                 loop {
-                    if let Err(e) = lock(libc::F_SETLKW, libc::F_WRLCK) {
+                    if let Err(e) = lock(libc::F_SETLKW, true) {
                         tracing::error!("zapd: cannot take the router lock: {e}");
                         std::thread::sleep(Duration::from_secs(1));
                         continue;
@@ -74,7 +103,7 @@ pub fn embed() {
                     }
                     // Resign so another process can try; then stand again.
                     ELECTED.store(false, Ordering::SeqCst);
-                    let _ = lock(libc::F_SETLK, libc::F_UNLCK);
+                    let _ = lock(libc::F_SETLK, false);
                     std::thread::sleep(Duration::from_secs(1));
                 }
             })
@@ -100,7 +129,8 @@ pub fn holder() -> Option<u32> {
     let fd = lock_fd().ok()?;
     // SAFETY: fcntl(F_GETLK) on a valid fd with a valid flock struct.
     let ok = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut l) } == 0;
-    (ok && l.l_type != libc::F_UNLCK as _).then_some(l.l_pid as u32)
+    let unlocked: libc::c_short = libc::F_UNLCK as _;
+    (ok && l.l_type != unlocked).then_some(l.l_pid as u32)
 }
 
 /// One open descriptor on `<runtime>/zapd.lock` per process, never closed.
@@ -109,34 +139,31 @@ pub fn holder() -> Option<u32> {
 /// the lock this very process holds.
 fn lock_fd() -> Result<std::os::unix::io::RawFd> {
     static FILES: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
-    let dir = runtime_dir();
-    let path = dir.join("zapd.lock");
+    let path = runtime_dir().join("zapd.lock");
     let mut files = FILES.lock().unwrap();
     if let Some((_, f)) = files.iter().find(|(p, _)| *p == path) {
         return Ok(f.as_raw_fd());
     }
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)?;
+    private_runtime()?;
     let f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&path)?;
     let fd = f.as_raw_fd();
     files.push((path, f));
     Ok(fd)
 }
 
-/// Take (`F_SETLKW`, blocking) or drop (`F_UNLCK`) the whole-file write lock.
-fn lock(cmd: libc::c_int, kind: libc::c_int) -> Result<()> {
+/// Take (`F_SETLKW`, blocking) or drop the whole-file write lock.
+fn lock(cmd: libc::c_int, take: bool) -> Result<()> {
     let fd = lock_fd()?;
     // SAFETY: a zeroed flock struct is valid; we set the fields fcntl reads.
     let mut l: libc::flock = unsafe { std::mem::zeroed() };
-    l.l_type = kind as _;
+    l.l_type = if take { libc::F_WRLCK } else { libc::F_UNLCK } as _;
     l.l_whence = libc::SEEK_SET as _;
     loop {
         // SAFETY: fcntl on a valid fd with a valid flock struct.
@@ -153,7 +180,7 @@ fn lock(cmd: libc::c_int, kind: libc::c_int) -> Result<()> {
 /// Bind the doors and serve until the process exits. Returns only if the UDS
 /// cannot be bound, which resigns the lock.
 async fn serve() -> Result<()> {
-    let path = socket_path();
+    let path = private_runtime()?.join("zapd.sock");
     let _ = std::fs::remove_file(&path); // stale: we hold the lock
     let uds = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -166,7 +193,7 @@ async fn serve() -> Result<()> {
             Ok((stream, _)) => {
                 let registry = registry.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = router::handle(stream, registry).await {
+                    if let Err(e) = router::handle(stream, registry, true).await {
                         tracing::debug!("zapd: connection ended: {e}");
                     }
                 });
@@ -199,8 +226,8 @@ async fn browser_door(registry: Registry) {
             }
             Err(e) => {
                 if !warned && wait >= Duration::from_secs(1) {
-                    tracing::warn!(
-                        "zapd: browser door 127.0.0.1:{port} unavailable ({e}); retrying"
+                    tracing::error!(
+                        "zapd: the browser door 127.0.0.1:{port} is held by another program ({e}); browsers cannot connect until it frees. `zapd pair --reset` moves the door to a free port, and every browser pairs again"
                     );
                     warned = true;
                 }

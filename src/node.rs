@@ -67,7 +67,7 @@ impl Node {
         crate::runtime().spawn(async move {
             let mut backoff = Duration::from_millis(50);
             loop {
-                if let Ok(s) = UnixStream::connect(crate::socket_path()).await {
+                if let Ok(s) = dial().await {
                     backoff = Duration::from_millis(50);
                     if let Err(e) = session(s, &hello, &inner).await {
                         tracing::debug!("zapd: node {} dropped: {e}", inner.id.lock().unwrap());
@@ -141,6 +141,11 @@ impl Node {
             .await
             .map_err(|_| Error::new(ErrorKind::ConnectionReset, "router changed"))?
     }
+}
+
+/// Connect to the router's socket, in a runtime directory that is this user's.
+async fn dial() -> Result<UnixStream> {
+    UnixStream::connect(crate::elect::private_runtime()?.join("zapd.sock")).await
 }
 
 /// One connection's life: HELLO, WELCOME, then answers until it drops.

@@ -31,8 +31,10 @@ of any kind releases the lock and wakes exactly one waiter. Record locks are
 per process and not inherited across `fork`, so a forked child never pins a
 dead router's seat.
 
-Each user's runtime directory, lock and port are their own: the port is
-`20000 + uid mod 10000`, so two users on one machine never contend.
+Each user's runtime directory, lock and door are their own. The runtime
+directory is created `0700`; one that is a symlink or another user's is never
+used, and one this user left open is tightened. The door port is picked free
+(20000–29999) when the pairing is minted and kept in it.
 
 ## The browser door
 
@@ -45,8 +47,11 @@ connection only if
 2. it proves the pairing token, after the router proves it first
    (HMAC-SHA256, fresh nonces both ways; the token never crosses the wire).
 
-A paired browser may address the router or answer a call. It may never call
-another node, and 60 s of silence closes it.
+A paired browser may only be a browser: its HELLO must name a `browser/…` id,
+and it can never take over an id that is registered. It may address the router
+or answer a call, never call another node, and 60 s of silence closes it. At
+most eight connections are being admitted at once, each for at most 2 s, and a
+message is at most 16 MiB.
 
 **Pairing, once per browser:** run `zapd pair` (or `hanzo-mcp pair`) and paste
 the code into the extension's popup. The code is `ws://127.0.0.1:<port>/#<token>`

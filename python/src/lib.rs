@@ -15,7 +15,9 @@
 use std::io::ErrorKind;
 use std::time::Duration;
 
-use pyo3::exceptions::{PyConnectionError, PyLookupError, PyOSError, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{
+    PyConnectionError, PyLookupError, PyOSError, PyPermissionError, PyTimeoutError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -25,6 +27,7 @@ fn err(e: std::io::Error) -> PyErr {
         ErrorKind::TimedOut => PyTimeoutError::new_err(msg),
         ErrorKind::NotFound => PyLookupError::new_err(msg),
         ErrorKind::ConnectionReset => PyConnectionError::new_err(msg),
+        ErrorKind::PermissionDenied => PyPermissionError::new_err(msg),
         _ => PyOSError::new_err(msg),
     }
 }
