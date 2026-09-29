@@ -8,3 +8,5 @@ AGENTS.md
 GEMINI.md
 __pycache__/
 .pytest_cache/
+# cargo-zigbuild leaves this in the working directory
+.intentionally-empty-file.o
