@@ -1,6 +1,6 @@
 {
   "name": "@zap-proto/zapd",
-  "version": "1.0.2",
+  "version": "1.1.2",
   "description": "The ZAP router's operator tool: `zapd pair` prints the browser pairing code, `zapd ls` lists the nodes on this machine's router. Downloads the canonical zap-proto/zapd native binary for your platform.",
   "bin": {
     "zapd": "bin/zapd.js"

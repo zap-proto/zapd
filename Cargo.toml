@@ -3,7 +3,7 @@ members = [".", "python"]
 
 [package]
 name = "zapd"
-version = "1.0.2"
+version = "1.1.2"
 edition = "2021"
 rust-version = "1.81"
 description = "The ZAP router — embedded in every ZAP process; one per user login, elected by lock"

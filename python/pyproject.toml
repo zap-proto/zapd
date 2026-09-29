@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "zapd"
-version = "1.0.2"
+version = "1.1.2"
 description = "The ZAP router, embedded: every process that speaks ZAP is a candidate; the kernel lock elects one"
 requires-python = ">=3.10"
 license = { text = "MIT OR Apache-2.0" }

@@ -1,6 +1,6 @@
 [package]
 name = "zapd-python"
-version = "1.0.2"
+version = "1.1.2"
 edition = "2021"
 publish = false
 description = "The ZAP router, embedded in Python: `import zapd`"
