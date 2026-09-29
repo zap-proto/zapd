@@ -4,7 +4,7 @@
 //! browser, agents, the dev CLI, the IDE, the desktop app) is connected here,
 //! through the UDS or the browser door, and this module relays opaque frames
 //! between them:
-//!   * **registry** — who is connected (`id → connection`, role, brand, caps),
+//!   * **registry** — who is connected (`id → connection`, descriptor),
 //!   * **route**    — relay an opaque frame from A to B by its `to` field,
 //!   * **presence** — broadcast peer connected/disconnected.
 //!
@@ -25,15 +25,13 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::frame::{self, Frame, ProviderEntry};
+use crate::frame::{self, Descriptor, Entry, Frame};
 use crate::id;
 
 /// A connected node. `tx` feeds its per-connection writer pump.
 struct Peer {
     tx: mpsc::UnboundedSender<Vec<u8>>,
-    role: u8,
-    brand: String,
-    caps: Vec<String>,
+    desc: Descriptor,
     /// Per-connection generation token. On disconnect a peer removes its own
     /// registry entry only if the entry is still its own — so a faster reconnect
     /// that already replaced it (same id) is never clobbered.
@@ -68,7 +66,7 @@ where
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
 
-    // 1) Require HELLO — the node proposes `<kind>/<name>`, role, brand, caps.
+    // 1) Require HELLO — the node proposes `<kind>/<name>` and its descriptor.
     let hello = match Frame::read(&mut rd).await? {
         Some(f) if f.typ == frame::HELLO => f,
         Some(_) => return Err(Error::new(ErrorKind::InvalidData, "expected HELLO")),
@@ -80,7 +78,8 @@ where
             .await?;
         return Err(Error::new(ErrorKind::InvalidData, why));
     };
-    let (role, brand, caps) = frame::decode_hello(&hello.payload)?;
+    let desc = frame::decode_hello(&hello.payload)?;
+    let (role, brand) = (desc.role, desc.brand.clone());
 
     // 2) Register, last-writer-wins. A reconnecting node with the same id takes
     //    over rather than being rejected as a duplicate — otherwise a stale
@@ -93,9 +92,7 @@ where
         id.clone(),
         Peer {
             tx: tx.clone(),
-            role,
-            brand: brand.clone(),
-            caps,
+            desc,
             token,
             evict,
         },
@@ -195,15 +192,13 @@ async fn route_loop<R: AsyncRead + Unpin>(rd: &mut R, registry: &Registry, id: &
 
 /// Every node on this router, each with its role. A caller that wants only
 /// providers filters on the role; the registry answers what it holds.
-fn list(registry: &Registry, brand_filter: &str) -> Vec<ProviderEntry> {
+fn list(registry: &Registry, brand_filter: &str) -> Vec<Entry> {
     let reg = registry.peers.lock().unwrap();
     reg.iter()
-        .filter(|(_, p)| brand_filter.is_empty() || p.brand == brand_filter)
-        .map(|(id, p)| ProviderEntry {
+        .filter(|(_, p)| brand_filter.is_empty() || p.desc.brand == brand_filter)
+        .map(|(id, p)| Entry {
             id: id.clone(),
-            role: p.role,
-            brand: p.brand.clone(),
-            caps: p.caps.clone(),
+            desc: p.desc.clone(),
         })
         .collect()
 }

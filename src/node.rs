@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::frame::{self, Frame, ProviderEntry};
+use crate::frame::{self, Descriptor, Entry, Frame};
 
 type Reply = oneshot::Sender<Result<Frame>>;
 
@@ -47,8 +47,18 @@ impl Node {
             waiting: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
         }));
-        let hello =
-            Frame::new(frame::HELLO, id, "", frame::encode_hello(role, brand, caps)).encode();
+        let hello = Frame::new(
+            frame::HELLO,
+            id,
+            "",
+            frame::encode_hello(&Descriptor {
+                role,
+                brand: brand.into(),
+                caps: caps.to_vec(),
+                attrs: Vec::new(),
+            }),
+        )
+        .encode();
         let inner = node.0.clone();
         crate::runtime().spawn(async move {
             let mut backoff = Duration::from_millis(50);
@@ -92,7 +102,7 @@ impl Node {
     }
 
     /// Every node on this router.
-    pub async fn nodes(&self, timeout: Duration) -> Result<Vec<ProviderEntry>> {
+    pub async fn nodes(&self, timeout: Duration) -> Result<Vec<Entry>> {
         tokio::time::timeout(timeout, async {
             let f = self
                 .ask(

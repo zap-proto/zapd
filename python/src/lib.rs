@@ -4,7 +4,7 @@
 //! import zapd
 //! zapd.embed()                                   # stand for router
 //! me = zapd.Node("agent:hanzo-mcp/dgx/42")       # take a seat, keep it
-//! me.nodes()                                     # [{"id", "role", "brand", "caps"}, ...]
+//! me.nodes()                                     # [{"id", "role", "brand", "caps", "attrs"}, ...]
 //! me.call("browser:chromium/dgx/default", body)  # -> bytes
 //! zapd.pair()                                    # the browser's pairing code
 //! ```
@@ -109,7 +109,7 @@ impl Node {
         Ok(PyBytes::new(py, &out))
     }
 
-    /// Every node on this user's router: `[{"id", "role", "brand", "caps"}]`.
+    /// Every node on this user's router: `[{"id", "role", "brand", "caps", "attrs"}]`.
     #[pyo3(signature = (timeout = 2.0))]
     fn nodes<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let nodes = py
@@ -122,14 +122,21 @@ impl Node {
                 d.set_item("id", n.id)?;
                 d.set_item(
                     "role",
-                    match n.role {
+                    match n.desc.role {
                         zapd::frame::ROLE_PROVIDER => "provider",
                         zapd::frame::ROLE_CONSUMER => "consumer",
                         _ => "router",
                     },
                 )?;
-                d.set_item("brand", n.brand)?;
-                d.set_item("caps", n.caps)?;
+                d.set_item("brand", n.desc.brand)?;
+                d.set_item("caps", n.desc.caps)?;
+                d.set_item(
+                    "attrs",
+                    n.desc
+                        .attrs
+                        .into_iter()
+                        .collect::<std::collections::HashMap<_, _>>(),
+                )?;
                 Ok(d)
             })
             .collect()

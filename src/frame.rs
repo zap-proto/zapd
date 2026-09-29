@@ -187,6 +187,18 @@ impl<'a> Cursor<'a> {
         Ok(String::from_utf8_lossy(self.take(n)?).into_owned())
     }
 
+    /// Refuse trailing bytes: a control body is exactly its fields.
+    pub fn end(&self) -> Result<()> {
+        if self.p == self.b.len() {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                "zapd: trailing bytes in control body",
+            ))
+        }
+    }
+
     /// u16-length-prefixed string (for control bodies).
     pub fn str(&mut self) -> Result<String> {
         let n = self.u16()? as usize;
@@ -201,76 +213,92 @@ pub fn put_str(b: &mut Vec<u8>, s: &str) {
     b.extend_from_slice(s.as_bytes());
 }
 
-/// HELLO body: role(u8) + brand(str) + caps(u16 count + str…).
-pub fn encode_hello(role: u8, brand: &str, caps: &[String]) -> Vec<u8> {
-    let mut b = Vec::new();
-    b.push(role);
-    put_str(&mut b, brand);
-    b.extend_from_slice(&(caps.len() as u16).to_le_bytes());
-    for c in caps {
-        put_str(&mut b, c);
-    }
-    b
-}
-
-/// Parse a HELLO body → (role, brand, caps).
-pub fn decode_hello(payload: &[u8]) -> Result<(u8, String, Vec<String>)> {
-    let mut c = Cursor::new(payload);
-    let role = c.u8()?;
-    let brand = c.str()?;
-    let n = c.u16()? as usize;
-    let mut caps = Vec::with_capacity(n);
-    for _ in 0..n {
-        caps.push(c.str()?);
-    }
-    Ok((role, brand, caps))
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderEntry {
-    pub id: String,
+/// What a node says about itself in HELLO, and what PROVIDERS returns for it:
+/// role(u8) + brand(str) + caps(u16 count + str…) + attrs(u16 count + (key
+/// str, value str)…). `caps` names what it serves; `attrs` carries the rest of
+/// its description (resources, `leasable`) as strings, so the router can match
+/// a query against them without a schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Descriptor {
     pub role: u8,
     pub brand: String,
     pub caps: Vec<String>,
+    pub attrs: Vec<(String, String)>,
 }
 
-/// PROVIDERS body: u16 count + per entry (id, role, brand, caps).
-pub fn encode_providers(entries: &[ProviderEntry]) -> Vec<u8> {
+impl Descriptor {
+    fn put(&self, b: &mut Vec<u8>) {
+        b.push(self.role);
+        put_str(b, &self.brand);
+        b.extend_from_slice(&(self.caps.len() as u16).to_le_bytes());
+        for c in &self.caps {
+            put_str(b, c);
+        }
+        b.extend_from_slice(&(self.attrs.len() as u16).to_le_bytes());
+        for (k, v) in &self.attrs {
+            put_str(b, k);
+            put_str(b, v);
+        }
+    }
+
+    fn take(c: &mut Cursor) -> Result<Descriptor> {
+        let role = c.u8()?;
+        let brand = c.str()?;
+        let caps = (0..c.u16()?).map(|_| c.str()).collect::<Result<_>>()?;
+        let attrs = (0..c.u16()?)
+            .map(|_| Ok((c.str()?, c.str()?)))
+            .collect::<Result<_>>()?;
+        Ok(Descriptor {
+            role,
+            brand,
+            caps,
+            attrs,
+        })
+    }
+}
+
+pub fn encode_hello(d: &Descriptor) -> Vec<u8> {
+    let mut b = Vec::new();
+    d.put(&mut b);
+    b
+}
+
+pub fn decode_hello(payload: &[u8]) -> Result<Descriptor> {
+    let mut c = Cursor::new(payload);
+    let d = Descriptor::take(&mut c)?;
+    c.end()?;
+    Ok(d)
+}
+
+/// One node in a PROVIDERS reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub id: String,
+    pub desc: Descriptor,
+}
+
+/// PROVIDERS body: u16 count + per entry (id str + descriptor).
+pub fn encode_providers(entries: &[Entry]) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for e in entries {
         put_str(&mut b, &e.id);
-        b.push(e.role);
-        put_str(&mut b, &e.brand);
-        b.extend_from_slice(&(e.caps.len() as u16).to_le_bytes());
-        for c in &e.caps {
-            put_str(&mut b, c);
-        }
+        e.desc.put(&mut b);
     }
     b
 }
 
-/// Parse a PROVIDERS body.
-pub fn decode_providers(payload: &[u8]) -> Result<Vec<ProviderEntry>> {
+pub fn decode_providers(payload: &[u8]) -> Result<Vec<Entry>> {
     let mut c = Cursor::new(payload);
-    let n = c.u16()? as usize;
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let id = c.str()?;
-        let role = c.u8()?;
-        let brand = c.str()?;
-        let nc = c.u16()? as usize;
-        let mut caps = Vec::with_capacity(nc);
-        for _ in 0..nc {
-            caps.push(c.str()?);
-        }
-        out.push(ProviderEntry {
-            id,
-            role,
-            brand,
-            caps,
-        });
-    }
+    let out = (0..c.u16()?)
+        .map(|_| {
+            Ok(Entry {
+                id: c.str()?,
+                desc: Descriptor::take(&mut c)?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    c.end()?;
     Ok(out)
 }
 
@@ -315,38 +343,43 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let body = encode_hello(
-            ROLE_PROVIDER,
-            "hanzo",
-            &["browser.tabs".into(), "browser.navigate".into()],
-        );
-        let (role, brand, caps) = decode_hello(&body).unwrap();
-        assert_eq!(role, ROLE_PROVIDER);
-        assert_eq!(brand, "hanzo");
-        assert_eq!(
-            caps,
-            vec!["browser.tabs".to_string(), "browser.navigate".to_string()]
-        );
+        let d = Descriptor {
+            role: ROLE_PROVIDER,
+            brand: "hanzo".into(),
+            caps: vec!["browser.tabs".into(), "browser.navigate".into()],
+            attrs: vec![("leasable".into(), "false".into())],
+        };
+        assert_eq!(decode_hello(&encode_hello(&d)).unwrap(), d);
+        let mut long = encode_hello(&d);
+        long.push(0);
+        assert!(decode_hello(&long).is_err(), "trailing bytes are refused");
     }
 
     #[test]
     fn providers_roundtrip() {
-        let entries = vec![ProviderEntry {
-            id: "browser:chrome/dbc/default".into(),
-            role: ROLE_PROVIDER,
-            brand: "hanzo".into(),
-            caps: vec!["tabs".into()],
-        }];
-        let body = encode_providers(&entries);
-        let back = decode_providers(&body).unwrap();
-        assert_eq!(back.len(), 1);
+        let entries = vec![
+            Entry {
+                id: "browser/dgx/chromium-3fa2".into(),
+                desc: Descriptor {
+                    role: ROLE_PROVIDER,
+                    brand: "hanzo".into(),
+                    caps: vec!["tabs".into()],
+                    attrs: vec![],
+                },
+            },
+            Entry {
+                id: "engine/spark/qwen3".into(),
+                desc: Descriptor {
+                    role: ROLE_PROVIDER,
+                    brand: "".into(),
+                    caps: vec![],
+                    attrs: vec![("model".into(), "qwen3-32b".into())],
+                },
+            },
+        ];
         assert_eq!(
-            (back[0].id.as_str(), back[0].role, back[0].caps.as_slice()),
-            (
-                "browser:chrome/dbc/default",
-                ROLE_PROVIDER,
-                &["tabs".to_string()][..]
-            )
+            decode_providers(&encode_providers(&entries)).unwrap(),
+            entries
         );
     }
 

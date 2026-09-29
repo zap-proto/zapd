@@ -74,6 +74,9 @@ Types: `HELLO(1) WELCOME(2) PROVIDERS_LIST(3) PROVIDERS(4) PEER_CONNECTED(5)
 PEER_DISCONNECTED(6) ERROR(7) AUTH(8)`; forwarded untouched: `ROUTE(16)
 RESPONSE(17) EVENT(18)`. A node says `HELLO` as `<kind>/<name>`; `WELCOME` is
 addressed to its full id `<kind>/<host>/<name>`. `PROVIDERS` lists every node.
+The descriptor a `HELLO` carries and `PROVIDERS` returns is `role(u8)
+brand(str) caps(u16 n, str…) attrs(u16 n, (str, str)…)`; strings are u16-length
+UTF-8.
 
 ## Embedding
 

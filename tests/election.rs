@@ -53,6 +53,15 @@ fn me_id() -> String {
     at("cli/", "me")
 }
 
+fn desc(role: u8, brand: &str, caps: &[String]) -> frame::Descriptor {
+    frame::Descriptor {
+        role,
+        brand: brand.into(),
+        caps: caps.to_vec(),
+        attrs: vec![],
+    }
+}
+
 struct Home {
     dir: PathBuf,
     pairing: Pairing,
@@ -152,7 +161,7 @@ impl Uds {
                 frame::HELLO,
                 id,
                 "",
-                frame::encode_hello(role, "hanzo", &[]),
+                frame::encode_hello(&desc(role, "hanzo", &[])),
             )
             .encode(),
         )
@@ -274,7 +283,7 @@ async fn browser(port: u16, key: &Pairing) -> Option<(Ws, String)> {
             frame::HELLO,
             "browser/test-3fa2",
             "",
-            frame::encode_hello(frame::ROLE_PROVIDER, "hanzo", &caps),
+            frame::encode_hello(&desc(frame::ROLE_PROVIDER, "hanzo", &caps)),
         ),
     )
     .await;
@@ -440,7 +449,7 @@ async fn door_refuses_strangers() {
             frame::HELLO,
             "browser/evil",
             "",
-            frame::encode_hello(frame::ROLE_PROVIDER, "hanzo", &[]),
+            frame::encode_hello(&desc(frame::ROLE_PROVIDER, "hanzo", &[])),
         ),
     )
     .await;
@@ -457,7 +466,7 @@ async fn door_refuses_strangers() {
             frame::HELLO,
             "browser/evil",
             "",
-            frame::encode_hello(frame::ROLE_PROVIDER, "hanzo", &[]),
+            frame::encode_hello(&desc(frame::ROLE_PROVIDER, "hanzo", &[])),
         ),
     )
     .await;
@@ -485,7 +494,7 @@ async fn door_refuses_strangers() {
             frame::HELLO,
             "root/../../x",
             "",
-            frame::encode_hello(frame::ROLE_CONSUMER, "", &[]),
+            frame::encode_hello(&desc(frame::ROLE_CONSUMER, "", &[])),
         )
         .encode(),
     )

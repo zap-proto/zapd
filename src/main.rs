@@ -41,13 +41,25 @@ fn ls() -> std::io::Result<()> {
     nodes.retain(|n| n.id != me);
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     for n in nodes {
-        let role = match n.role {
+        let role = match n.desc.role {
             zapd::frame::ROLE_PROVIDER => "provider",
             zapd::frame::ROLE_CONSUMER => "consumer",
             zapd::frame::ROLE_ROUTER => "router",
             _ => "?",
         };
-        println!("{}\t{role}\t{}\t{}", n.id, n.brand, n.caps.join(","));
+        let attrs: Vec<String> = n
+            .desc
+            .attrs
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        println!(
+            "{}\t{role}\t{}\t{}\t{}",
+            n.id,
+            n.desc.brand,
+            n.desc.caps.join(","),
+            attrs.join(",")
+        );
     }
     Ok(())
 }
