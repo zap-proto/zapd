@@ -12,8 +12,15 @@ Full docs: **README.md**. Design: HIP-0069 (hanzoai/hips).
   transport-free), `elect` (lock, doors, the one runtime thread), `door`
   (Origin/Host check, pairing proof, browsers never originate), `pair` (the
   code file `<state>/zap/pair`, 0600, lstat-checked), `node` (a process's seat;
-  reconnects 50 ms→1 s; one call at a time, matched by responder `from`).
+  reconnects 50 ms→1 s; one call at a time, matched by responder `from`; talks
+  only to a socket whose peer pid is the lock holder).
+- **POSIX record locks drop when ANY fd of the file closes.** The lock file is
+  opened once per process (`elect::lock_fd`) and never closed; never open it
+  anywhere else, or the router in this process loses its seat.
 - **Binary:** `zapd pair [--reset]`, `zapd ls`. It never serves.
+- **Release:** tag `v*` → binaries + npm `@zap-proto/zapd`, abi3 wheels to
+  PyPI `zapd`, crate to crates.io `zapd`. Versions follow the tags (v1.1.1 was
+  the last before the library).
 - **Python:** `python/` — PyO3 binding of the same crate (`import zapd`),
   abi3-py310, built with maturin. The one router implementation; do not port it.
 - **Test:** `cargo test` runs the election end to end with real processes (the

@@ -99,3 +99,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { pattern: 'wheel-*', merge-multiple: true, path: dist }
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # The crate the Rust hosts (dev, desktop, the IDE) embed — crates.io trusted
+  # publishing, no token in the repository.
+  crates:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish -p zapd
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
