@@ -1,82 +1,53 @@
-//! zapd — the ZAP universal router (and, in the same binary, the browser
-//! native-messaging host). ONE artifact, decomplected into modules
-//! (frame / broker / host / install). No Cap'n Proto — the wire is the ZAP
-//! envelope.
+//! `zapd` — the operator's view of this user's router. It never serves: the
+//! router runs inside the processes that speak ZAP (see the library).
 //!
-//! Modes:
-//!   zapd                  → router daemon (registry + route + presence)
-//!   zapd host             → native-messaging host (browser stdio ⇄ router)
-//!   zapd install-host     → write native-host manifests so the browser can
-//!                           launch this binary on connectNative()
-//! When a browser launches it (passing the extension origin) it auto-enters
-//! host mode.
+//!   zapd pair            print the pairing code the browser extension needs
+//!   zapd pair --reset    mint a new key; every paired browser pairs again
+//!   zapd ls              list the nodes on this machine's router
 
-mod broker;
-mod host;
-mod install;
-// frame.rs is the full ZAP envelope surface; each mode uses a subset.
-#[allow(dead_code)]
-mod frame;
+use std::process::ExitCode;
+use std::time::Duration;
 
-use clap::{Parser, Subcommand};
-use std::io::Result;
-
-#[derive(Parser)]
-#[command(name = "zapd", version, about = "ZAP universal router — the one shared local broker")]
-struct Cli {
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
-
-    /// Override the socket path (router mode).
-    #[arg(long, env = "ZAP_SOCK")]
-    sock: Option<String>,
-
-    /// Log filter (router mode).
-    #[arg(long, default_value = "info", env = "ZAP_LOG")]
-    log: String,
-}
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Native-messaging host mode (browsers launch this; usually auto-detected).
-    Host,
-    /// Write native-messaging host manifests for a brand (e.g. hanzo).
-    InstallHost {
-        #[arg(long, default_value = "hanzo")]
-        brand: String,
-    },
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // A browser launched us as its native host. Detect BEFORE clap (clap would
-    // reject the browser-supplied args), and never log to stdout here (stdout IS
-    // the native-messaging channel). Detection must cover both browser families:
-    //   • Chrome/Chromium pass the extension ORIGIN (chrome-extension://<id>/).
-    //   • Firefox 55+ passes the native-messaging MANIFEST PATH as argv[1] plus
-    //     the bare add-on ID (e.g. "hanzo-ai@hanzo.ai") — NO extension:// scheme.
-    // Both browsers always pass the manifest path first; keying on the manifest
-    // filename catches every engine and stays brand/host agnostic.
-    if std::env::args().skip(1).any(|a| {
-        a.starts_with("chrome-extension://")
-            || a.starts_with("moz-extension://")
-            || a.ends_with(".zap.json")                     // native-host manifest path (any brand)
-            || (a.contains('@') && !a.contains('/') && !a.contains(' ')) // Firefox add-on id
-    }) {
-        return host::run().await;
-    }
-
-    let cli = Cli::parse();
-    match cli.cmd {
-        Some(Cmd::Host) => host::run().await,
-        Some(Cmd::InstallHost { brand }) => install::run(&brand),
-        None => {
-            if let Some(sock) = cli.sock {
-                std::env::set_var("ZAP_SOCK", sock);
-            }
-            tracing_subscriber::fmt().with_env_filter(cli.log).init();
-            tracing::info!("zapd {} starting", env!("CARGO_PKG_VERSION"));
-            broker::run().await
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = match args.as_slice() {
+        ["pair"] => zapd::pair::load().map(|p| println!("{}", p.code())),
+        ["pair", "--reset"] => zapd::pair::reset().map(|p| println!("{}", p.code())),
+        ["ls"] => ls(),
+        ["--version" | "-V"] => {
+            println!("zapd {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        _ => {
+            eprintln!("usage: zapd pair [--reset] | zapd ls");
+            return ExitCode::from(2);
+        }
+    };
+    match out {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("zapd: {e}");
+            ExitCode::FAILURE
         }
     }
+}
+
+fn ls() -> std::io::Result<()> {
+    let me = format!("cli/{}", std::process::id());
+    let node = zapd::Node::join(&me, zapd::frame::ROLE_CONSUMER, "", &[]);
+    let mut nodes = zapd::block_on(node.nodes(Duration::from_secs(2)))?;
+    let me = node.id();
+    nodes.retain(|n| n.id != me);
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
+    for n in nodes {
+        let role = match n.role {
+            zapd::frame::ROLE_PROVIDER => "provider",
+            zapd::frame::ROLE_CONSUMER => "consumer",
+            zapd::frame::ROLE_ROUTER => "router",
+            _ => "?",
+        };
+        println!("{}\t{role}\t{}\t{}", n.id, n.brand, n.caps.join(","));
+    }
+    Ok(())
 }

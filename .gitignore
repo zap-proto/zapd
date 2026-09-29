@@ -6,3 +6,5 @@ npm/bin/zapd
 CLAUDE.md
 AGENTS.md
 GEMINI.md
+__pycache__/
+.pytest_cache/

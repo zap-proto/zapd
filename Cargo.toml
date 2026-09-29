@@ -1,38 +1,47 @@
+[workspace]
+members = [".", "python"]
+
 [package]
 name = "zapd"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 rust-version = "1.81"
-description = "ZAP universal router — the one shared local broker every ZAP service connects to"
+description = "The ZAP router — embedded in every ZAP process; one per user login, elected by lock"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/zap-proto/zapd"
 keywords = ["zap", "zapd", "router", "broker", "rpc"]
 categories = ["network-programming"]
 
-# ONE binary. Router by default; native-messaging host when a browser launches
-# it (or `zapd host`). Decomplected into modules (frame / broker / host), not
-# into separate artifacts.
+# The router is a library: every process that speaks ZAP embeds it and the
+# lock elects one of them. The `zapd` binary is the operator's tool — `pair`
+# and `ls` — and never serves.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "zapd"
 path = "src/main.rs"
 
 [dependencies]
-# The universal router is schema-agnostic: it never parses a payload, so it
-# depends on NO ZAP schema crate and — deliberately — NO capnp. It moves
-# opaque ZAP frames between nodes on std::io + tokio alone. The ZAP wire/RPC
-# (our fork) lives end-to-end between providers and consumers, above the router.
-tokio = { version = "1", features = ["full"] }
+# The router is schema-agnostic: it never parses a payload, so it depends on NO
+# ZAP schema crate and no capnp. It moves opaque ZAP frames on tokio alone.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4", features = ["derive", "env"] }
 directories = "5"
-# Native-messaging host mode: the Chrome-forced JSON inch (the only JSON, at the
-# browser boundary) + base64 for the opaque payload. Everything else is binary.
-serde_json = "1"
-base64 = "0.22"
-# flock(2) for the single-instance spawn lock (serialize unlink+bind so racing
-# routers can't both win on a stale socket). Tiny, already a transitive dep.
+# fcntl(2) record lock (the election) and getuid(2) (the per-user port).
 libc = "0.2"
+# The browser door: a loopback WebSocket, because a browser extension can open
+# nothing else. Handshake only — no TLS, no client connector in the router.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Pairing: HMAC-SHA256 challenge-response over a 32-byte token; the token
+# never crosses the wire.
+hmac = "0.13"
+sha2 = "0.11"
+getrandom = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 
 [profile.release]
 lto = true

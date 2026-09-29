@@ -26,14 +26,27 @@ jobs:
       - name: musl tools
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+      - run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - run: cargo build --release --target ${{ matrix.target }}
       - if: matrix.run
-        run: cargo test --target ${{ matrix.target }}
-      - name: e2e router + native-host (python)
-        if: matrix.run
+        run: cargo test -p zapd --target ${{ matrix.target }}   # includes the multi-process election
+
+  python:
+    name: python binding
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: build + test
+        working-directory: python
         run: |
-          export ZAP_SOCK=/tmp/zapd-ci.sock
-          ./target/${{ matrix.target }}/release/zapd --log warn &
-          sleep 1
-          python3 tests/e2e.py "$ZAP_SOCK"
+          python -m venv .venv && . .venv/bin/activate
+          pip install maturin pytest
+          maturin develop --release
+          pytest -q tests

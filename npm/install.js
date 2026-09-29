@@ -92,8 +92,8 @@ fetchText(sumUrl, (sumText) => {
       fail(`checksum mismatch for ${asset}\n  expected ${expected}\n  actual   ${actual}`);
     }
     // ATOMIC install: never overwrite the live binary in place. A running zapd
-    // (browser native host, or the router) holds the inode; extracting over it
-    // mid-exec yields a corrupt/partial binary → ETXTBSY crash-loop. Stage to a
+    // holds the inode; extracting over it mid-exec yields a corrupt or partial
+    // binary (ETXTBSY). Stage to a
     // temp dir, chmod, verify it runs, then rename() over the path — atomic on
     // macOS/Linux; existing processes keep the old inode, new launches get the new.
     const stageDir = fs.mkdtempSync(path.join(binDir, '.stage-'));

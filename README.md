@@ -1,113 +1,119 @@
-# zapd — the ZAP universal router
+# zapd — the ZAP router
 
-One brand-neutral daemon per machine. Every ZAP service — browser extensions
-(via the native host), IDE extensions, CLI agents, hanzo-mcp — connects to the
-**one shared Unix socket** and is multiplexed here. Launched once, shared by
-all. Brands ship thin white-label wrappers (`@hanzo/zapd`, `@lux/zapd`,
-`@zoo/zapd`) over this same binary.
+The one local router every ZAP node of a user login connects to — the browser
+extension, agents' MCP servers, the dev CLI, the IDE, the desktop app — as a
+**library**, not a daemon. Every process that speaks ZAP embeds it and stands
+for election; the kernel picks one; when that process exits, another takes
+over and every node reconnects. Nobody starts anything.
+
+Design: [HIP-0069 — ZAP Mesh](https://github.com/hanzoai/hips/blob/main/HIPs/hip-0069-service-discovery-and-auto-bridge.md).
 
 ## What it is
 
 ```
 zapd =
-  registry   # who is connected:  id → connection, role, brand, caps
-  router     # forward an opaque frame from A to B by its `to` field
-  presence   # broadcast peer connected / disconnected
+  registry   # who is connected: <kind>/<host>/<name> → connection, role, brand, caps
+  route      # forward an opaque frame from A to B by its `to` field
+  presence   # broadcast node connected / disconnected
+  election   # which of this user's processes is the router
+  door       # the loopback WebSocket a browser extension connects to
 ```
 
-…and nothing else. **No leases. No schema parsing. No `.capnp`. No `.zap`
-payload parsing. No browser/payments/PQ logic.** The router is dumb and strong:
-opaque frame in → look up destination → opaque frame out.
+The router never parses a payload, never speaks a schema, never holds a lease.
 
-- **Leasing / exclusivity** is a provider-local concern (a provider may reply
-  `busy`); the router never locks.
-- **E2E post-quantum encryption** (X25519 + ML-KEM, AEAD channel) and
-  **payments** ride *inside* `payload` as opaque bytes, end-to-end between
-  peers — the router cannot read them.
-- **PQ identity** (DID + ML-DSA) is verified at `hello`; the router stamps the
-  verified `from` onto every forwarded frame so a peer can never spoof another.
+## Election
 
-Typed protocols live in their own `.zap` schemas, never here:
-`zap-proto/browser`, `zap-proto/payments`, `zap-proto/identity`.
+Each candidate blocks on an `fcntl` write lock on `<runtime>/zapd.lock`
+(`<runtime>` = `$XDG_RUNTIME_DIR/zap`, else `~/.zap/run`). The kernel grants it
+to one process, which unlinks any stale socket, binds `<runtime>/zapd.sock`
+(0600) and the browser door `127.0.0.1:<port>`, and serves until it exits. Exit
+of any kind releases the lock and wakes exactly one waiter. Record locks are
+per process and not inherited across `fork`, so a forked child never pins a
+dead router's seat.
 
-## Socket
+Each user's runtime directory, lock and port are their own: the port is
+`20000 + uid mod 10000`, so two users on one machine never contend.
 
-Brand-neutral, never TCP:
+## The browser door
+
+A browser extension can open a WebSocket and nothing else. The door admits a
+connection only if
+
+1. `Origin` is our Blink extension (`chrome-extension://biingenefmanpecedoafkfajbnlgdmbl`)
+   or any `moz-extension://` / `safari-web-extension://` origin, and `Host` is
+   this loopback port — no web page gets a socket; and
+2. it proves the pairing token, after the router proves it first
+   (HMAC-SHA256, fresh nonces both ways; the token never crosses the wire).
+
+A paired browser may address the router or answer a call. It may never call
+another node, and 60 s of silence closes it.
+
+**Pairing, once per browser:** run `zapd pair` (or `hanzo-mcp pair`) and paste
+the code into the extension's popup. The code is `ws://127.0.0.1:<port>/#<token>`
+and lives in `<state>/zap/pair` (`~/.local/state/zap/pair` on Linux), 0600.
+`zapd pair --reset` mints a new token; every browser pairs again.
+
+## The envelope
+
+Little-endian, binary, the same bytes on the socket and — one frame per binary
+message — on the WebSocket:
 
 ```
-$ZAP_SOCK  ›  $XDG_RUNTIME_DIR/zap/zapd.sock  ›  ~/.zap/run/zapd.sock
-```
-
-Socket-activation friendly (`ZAP_LISTEN_FD`); single-instance guard refuses to
-fight a live router for the path.
-
-## ZAP router envelope (little-endian, binary — not JSON, not capnp)
-
-```
-u32 len            bytes that follow
+u32 len            bytes that follow; must equal 11 + from_len + to_len + payload_len
 u8  type
 u16 flags
 u16 from_len
 u16 to_len
 u32 payload_len
-bytes from         source id (router stamps the verified id)
-bytes to           destination (empty ⇒ the frame is for zapd)
+bytes from         sender id (the router overwrites it with the registered id)
+bytes to           destination (empty ⇒ the frame is for the router)
 bytes payload      opaque
 ```
 
-Routing rule: `to` empty ⇒ for zapd (`hello`, `providers.list`); `to` set ⇒
-forward opaquely. Correlation lives in the payload's `.zap` schema, not here.
-
 Types: `HELLO(1) WELCOME(2) PROVIDERS_LIST(3) PROVIDERS(4) PEER_CONNECTED(5)
-PEER_DISCONNECTED(6) ERROR(7)`; pass-through `ROUTE(16) RESPONSE(17) EVENT(18)`.
+PEER_DISCONNECTED(6) ERROR(7) AUTH(8)`; forwarded untouched: `ROUTE(16)
+RESPONSE(17) EVENT(18)`. A node says `HELLO` as `<kind>/<name>`; `WELCOME` is
+addressed to its full id `<kind>/<host>/<name>`. `PROVIDERS` lists every node.
 
-## Run
+## Embedding
+
+Rust:
+
+```rust
+zapd::embed();                                            // stand for router
+let me = zapd::Node::join("dev/4242", zapd::frame::ROLE_CONSUMER, "hanzo", &[]);
+let nodes = me.nodes(Duration::from_secs(2)).await?;
+let reply = me.call("browser/dgx/chromium-3fa2", payload, Duration::from_secs(30)).await?;
+```
+
+Python (`python/`, built with maturin, `import zapd`):
+
+```python
+zapd.embed()
+me = zapd.Node("agent/hanzo-4242")
+me.nodes(); me.call(to, payload, timeout=30.0); zapd.pair()
+```
+
+## Operate
 
 ```sh
-cargo run                      # binds the shared socket
-ZAP_SOCK=/tmp/zapd.sock cargo run --release
+zapd pair            # the pairing code for the browser extension
+zapd pair --reset    # new token; browsers pair again
+zapd ls              # the nodes on this machine's router
 ```
 
 ## Test
 
 ```sh
-cargo build
-ZAP_SOCK=/tmp/zapd-e2e.sock ./target/debug/zapd --log warn &
-python3 tests/e2e.py /tmp/zapd-e2e.sock
+cargo test                                   # frames, ids, pairing, door, and the
+                                             # multi-process election end to end
+cd python && maturin develop && pytest       # the binding, end to end
 ```
 
-Exercises register → `providers.list` → opaque route (verified `from`, payload
-byte-identical) → response → presence-on-disconnect.
-
-## Install
+## Install the operator tool
 
 ```sh
-# curl | sh (macOS/Linux, arm64/amd64 — native binary, no build, atomic install)
 curl -fsSL https://raw.githubusercontent.com/zap-proto/zapd/main/install.sh | sh
-
-# or npm (downloads the same canonical binary)
+# or
 npm i -g @zap-proto/zapd
 ```
-
-You don't start it. zapd is **spawned on demand** (LSP / gpg-agent / tmux style):
-the first client that needs it — a browser native host (`connectNative`) or
-hanzo-mcp — connect-or-spawns the router, which binds `~/.zap/run/zapd.sock`. The
-socket bind **is** the single-instance guard: exactly one router per user, no
-daemon manager required. Racing spawns all but one exit cleanly on `AddrInUse`.
-
-Optional supervision (NOT required — only to pin it at boot):
-
-```sh
-# macOS (optional)
-cp dist/zap.zapd.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/zap.zapd.plist
-# Linux (optional)
-mkdir -p ~/.config/systemd/user && cp dist/zapd.service ~/.config/systemd/user/ && systemctl --user enable --now zapd
-```
-
-## CI / release
-
-- **ci** (`.github/workflows/ci.yml`): clippy `-D warnings` + `cargo test` + e2e on
-  4 **native** targets (macOS arm64/amd64, Linux musl amd64/arm64) — no QEMU.
-- **release** (`.github/workflows/release.yml`): on `v*` tag, builds all 4 targets,
-  uploads `zapd-<target>.tar.gz` (+ sha256) to the GitHub Release, and publishes
-  `@hanzo/zapd` to npm.

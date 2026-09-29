@@ -18,8 +18,12 @@
 //! forward opaquely. Request/response correlation lives in the payload's `.zap`
 //! schema, not here — the router does not correlate.
 //!
-//! The HELLO / PROVIDERS bodies below are zapd's *own* control protocol (the
-//! `to`-empty frames), not application payloads — the router owns them.
+//! The same bytes ride every transport: a byte stream on the UDS, and one
+//! WebSocket binary message per frame on the browser door (length prefix
+//! included, so one codec serves both).
+//!
+//! The HELLO / PROVIDERS / AUTH bodies below are zapd's *own* control protocol
+//! (the `to`-empty frames), not application payloads — the router owns them.
 
 use std::io::{Error, ErrorKind, Result};
 
@@ -33,6 +37,8 @@ pub const PROVIDERS: u8 = 4;
 pub const PEER_CONNECTED: u8 = 5;
 pub const PEER_DISCONNECTED: u8 = 6;
 pub const ERROR: u8 = 7;
+/// Pairing proof on the browser door (see `pair.rs`); never seen on the UDS.
+pub const AUTH: u8 = 8;
 // Pass-through types the router forwards but never interprets.
 pub const ROUTE: u8 = 16;
 pub const RESPONSE: u8 = 17;
@@ -44,7 +50,7 @@ pub const ROLE_CONSUMER: u8 = 2;
 pub const ROLE_ROUTER: u8 = 3;
 
 const HEADER: usize = 1 + 2 + 2 + 2 + 4; // type + flags + from_len + to_len + payload_len
-const MAX_FRAME: u32 = 64 * 1024 * 1024;
+pub const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
 /// A parsed ZAP router envelope. `payload` is opaque to the router.
 #[derive(Debug, Clone)]
@@ -58,7 +64,13 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(typ: u8, from: impl Into<String>, to: impl Into<String>, payload: Vec<u8>) -> Self {
-        Self { typ, flags: 0, from: from.into(), to: to.into(), payload }
+        Self {
+            typ,
+            flags: 0,
+            from: from.into(),
+            to: to.into(),
+            payload,
+        }
     }
 
     /// Serialize to the wire.
@@ -93,8 +105,28 @@ impl Frame {
         }
         let mut buf = vec![0u8; len as usize];
         r.read_exact(&mut buf).await?;
+        Self::body(&buf).map(Some)
+    }
 
-        let mut c = Cursor::new(&buf);
+    /// Decode exactly one whole frame, length prefix included — a WebSocket
+    /// message. Anything short, long or trailing is refused.
+    pub fn decode(b: &[u8]) -> Result<Frame> {
+        let len = b
+            .get(..4)
+            .map(|l| u32::from_le_bytes(l.try_into().unwrap()) as usize);
+        match len {
+            Some(n) if n + 4 == b.len() && n >= HEADER && n <= MAX_FRAME as usize => {
+                Self::body(&b[4..])
+            }
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                "zapd: not one whole frame",
+            )),
+        }
+    }
+
+    fn body(buf: &[u8]) -> Result<Frame> {
+        let mut c = Cursor::new(buf);
         let typ = c.u8()?;
         let flags = c.u16()?;
         let from_len = c.u16()? as usize;
@@ -103,7 +135,19 @@ impl Frame {
         let from = c.string(from_len)?;
         let to = c.string(to_len)?;
         let payload = c.take(pay_len)?.to_vec();
-        Ok(Some(Frame { typ, flags, from, to, payload }))
+        if c.p != buf.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "zapd: frame length disagrees with its fields",
+            ));
+        }
+        Ok(Frame {
+            typ,
+            flags,
+            from,
+            to,
+            payload,
+        })
     }
 }
 
@@ -182,6 +226,7 @@ pub fn decode_hello(payload: &[u8]) -> Result<(u8, String, Vec<String>)> {
     Ok((role, brand, caps))
 }
 
+#[derive(Debug, Clone)]
 pub struct ProviderEntry {
     pub id: String,
     pub role: u8,
@@ -205,6 +250,30 @@ pub fn encode_providers(entries: &[ProviderEntry]) -> Vec<u8> {
     b
 }
 
+/// Parse a PROVIDERS body.
+pub fn decode_providers(payload: &[u8]) -> Result<Vec<ProviderEntry>> {
+    let mut c = Cursor::new(payload);
+    let n = c.u16()? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let id = c.str()?;
+        let role = c.u8()?;
+        let brand = c.str()?;
+        let nc = c.u16()? as usize;
+        let mut caps = Vec::with_capacity(nc);
+        for _ in 0..nc {
+            caps.push(c.str()?);
+        }
+        out.push(ProviderEntry {
+            id,
+            role,
+            brand,
+            caps,
+        });
+    }
+    Ok(out)
+}
+
 /// PROVIDERS_LIST body: optional brand filter (empty = all).
 pub fn decode_brand_filter(payload: &[u8]) -> String {
     if payload.is_empty() {
@@ -226,7 +295,12 @@ mod tests {
 
     #[test]
     fn envelope_roundtrip() {
-        let f = Frame::new(ROUTE, "consumer:mcp/1", "browser:chrome/dbc/default", b"opaque-\x00\x01\x02".to_vec());
+        let f = Frame::new(
+            ROUTE,
+            "consumer:mcp/1",
+            "browser:chrome/dbc/default",
+            b"opaque-\x00\x01\x02".to_vec(),
+        );
         let bytes = f.encode();
         let mut c = Cursor::new(&bytes[4..]); // skip the u32 frame len
         assert_eq!(c.u8().unwrap(), ROUTE);
@@ -241,11 +315,18 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let body = encode_hello(ROLE_PROVIDER, "hanzo", &["browser.tabs".into(), "browser.navigate".into()]);
+        let body = encode_hello(
+            ROLE_PROVIDER,
+            "hanzo",
+            &["browser.tabs".into(), "browser.navigate".into()],
+        );
         let (role, brand, caps) = decode_hello(&body).unwrap();
         assert_eq!(role, ROLE_PROVIDER);
         assert_eq!(brand, "hanzo");
-        assert_eq!(caps, vec!["browser.tabs".to_string(), "browser.navigate".to_string()]);
+        assert_eq!(
+            caps,
+            vec!["browser.tabs".to_string(), "browser.navigate".to_string()]
+        );
     }
 
     #[test]
@@ -257,15 +338,33 @@ mod tests {
             caps: vec!["tabs".into()],
         }];
         let body = encode_providers(&entries);
-        let mut c = Cursor::new(&body);
-        assert_eq!(c.u16().unwrap(), 1); // count
-        assert_eq!(c.str().unwrap(), "browser:chrome/dbc/default");
+        let back = decode_providers(&body).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(
+            (back[0].id.as_str(), back[0].role, back[0].caps.as_slice()),
+            (
+                "browser:chrome/dbc/default",
+                ROLE_PROVIDER,
+                &["tabs".to_string()][..]
+            )
+        );
     }
 
     #[test]
     fn cursor_rejects_truncation() {
         let mut c = Cursor::new(&[0u8, 1]);
         assert!(c.u32().is_err());
+    }
+
+    #[test]
+    fn decode_takes_exactly_one_frame() {
+        let bytes = Frame::new(AUTH, "", "", vec![7; 32]).encode();
+        let f = Frame::decode(&bytes).unwrap();
+        assert_eq!((f.typ, f.payload.len()), (AUTH, 32));
+        assert!(Frame::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut two = bytes.clone();
+        two.extend_from_slice(&bytes);
+        assert!(Frame::decode(&two).is_err());
     }
 
     #[test]

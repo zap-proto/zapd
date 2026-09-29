@@ -1,7 +1,7 @@
 {
   "name": "@zap-proto/zapd",
-  "version": "1.0.1",
-  "description": "ZAP universal router — the one shared local broker every ZAP service connects to. Downloads the canonical zap-proto/zapd native binary for your platform; `npx @zap-proto/zapd` to run, `… install-host` to register the browser native host.",
+  "version": "1.0.2",
+  "description": "The ZAP router's operator tool: `zapd pair` prints the browser pairing code, `zapd ls` lists the nodes on this machine's router. Downloads the canonical zap-proto/zapd native binary for your platform.",
   "bin": {
     "zapd": "bin/zapd.js"
   },
@@ -30,7 +30,6 @@
     "zapd",
     "router",
     "broker",
-    "native-messaging",
     "rpc"
   ],
   "license": "MIT OR Apache-2.0"

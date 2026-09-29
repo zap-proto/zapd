@@ -27,7 +27,7 @@ jobs:
       - name: musl tools
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build -p zapd --release --target ${{ matrix.target }}
       - name: package
         run: |
           tar -C target/${{ matrix.target }}/release -czf zapd-${{ matrix.target }}.tar.gz zapd
@@ -63,3 +63,39 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # The Python binding (`import zapd`): abi3 wheels, one per platform, published
+  # with PyPI trusted publishing (no token in the repo).
+  wheels:
+    name: wheel ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,         target: aarch64-apple-darwin }
+          - { os: macos-14,         target: x86_64-apple-darwin }
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: python/dist/*.whl
+
+  pypi:
+    needs: wheels
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'wheel-*', merge-multiple: true, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "zapd"
+version = "1.0.2"
+description = "The ZAP router, embedded: every process that speaks ZAP is a candidate; the kernel lock elects one"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+classifiers = ["Programming Language :: Rust", "Operating System :: POSIX"]
+
+[project.urls]
+Repository = "https://github.com/zap-proto/zapd"
+
+[tool.maturin]
+module-name = "zapd"
