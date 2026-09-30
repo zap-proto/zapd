@@ -96,16 +96,18 @@ impl Pairing {
     }
 }
 
-/// The door ports a Blink extension tries by itself, with no pairing code:
-/// the first of these free on this machine is the one a new pairing takes.
-pub const WELL_KNOWN: std::ops::RangeInclusive<u16> = 21000..=21007;
+/// The door ports a Blink extension tries by itself, with no pairing code, in
+/// this order: 9998 (ZAP over WebSocket, beside the services' native ZAP on
+/// 9999), then 21000-21007 for when 9998 is taken. The first free one is what
+/// a new pairing takes.
+pub const WELL_KNOWN: &[u16] = &[9998, 21000, 21001, 21002, 21003, 21004, 21005, 21006, 21007];
 
 /// A door port for a new pairing: the first free well-known port, else one in
 /// 20000–29999 — below every OS's ephemeral range — that nothing on this
 /// machine holds now. It is written into the pairing, which is what the router
 /// binds from then on.
 pub fn free_port() -> Result<u16> {
-    for p in WELL_KNOWN {
+    for &p in WELL_KNOWN {
         if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
             return Ok(p);
         }

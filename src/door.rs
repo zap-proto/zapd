@@ -17,7 +17,7 @@
 //!    Our Blink extension is admitted on its Origin alone and needs no pairing:
 //!    a page cannot present that Origin, so the only party that can is a
 //!    process already running on this machine — and the door listens on the
-//!    well-known ports (`pair::WELL_KNOWN`) the extension finds by itself.
+//!    well-known ports (`pair::WELL_KNOWN`: 9998 first) the extension finds by itself.
 //!
 //! After both, the browser is one more node: its frames — the ZAP router
 //! envelope, one per WebSocket binary message — are piped into `router::handle`
