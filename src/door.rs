@@ -12,9 +12,12 @@
 //!    `safari-web-extension://` origin — those ids are random per install, so
 //!    there the proof below is what authenticates. `Host` must be this loopback
 //!    port, which also refuses DNS rebinding.
-//! 2. **Pairing proof** (`pair.rs`): mutual HMAC over this user's pairing key,
-//!    router first. A process that sets any Origin it likes still cannot answer
-//!    without the key, which is 0600 in this user's config.
+//! 2. **Pairing proof** (`pair.rs`), for the per-install random origins
+//!    (Firefox, Safari): mutual HMAC over this user's pairing key, router first.
+//!    Our Blink extension is admitted on its Origin alone and needs no pairing:
+//!    a page cannot present that Origin, so the only party that can is a
+//!    process already running on this machine — and the door listens on the
+//!    well-known ports (`pair::WELL_KNOWN`) the extension finds by itself.
 //!
 //! After both, the browser is one more node: its frames — the ZAP router
 //! envelope, one per WebSocket binary message — are piped into `router::handle`
@@ -29,6 +32,7 @@
 //! HELLO at any time, each for at most 2 s, and a message is at most 16 MiB.
 
 use std::io::{Error, ErrorKind, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -127,9 +131,14 @@ async fn admit(
         .max_frame_size(Some(MAX_MESSAGE));
     // The Err type is tungstenite's upgrade-callback contract, not ours to shrink.
     #[allow(clippy::result_large_err)]
+    // Our Blink extension's fixed origin is its own proof; any other admitted
+    // origin still pairs.
+    let blink = Arc::new(AtomicBool::new(false));
+    let seen = blink.clone();
     let callback =
-        |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
+        move |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
             let header = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
+            seen.store(header("origin").is_some_and(|o| BLINK.contains(&o)), Ordering::Relaxed);
             match check(header("origin"), header("host"), port) {
                 Ok(()) => Ok(resp),
                 Err(why) => {
@@ -143,7 +152,9 @@ async fn admit(
         let mut ws = tokio_tungstenite::accept_hdr_async_with_config(tcp, callback, Some(config))
             .await
             .map_err(|e| Error::new(ErrorKind::PermissionDenied, e.to_string()))?;
-        prove(&mut ws).await?;
+        if !blink.load(Ordering::Relaxed) {
+            prove(&mut ws).await?;
+        }
         let hello = browser_hello(&mut ws).await?;
         Ok::<_, Error>((ws, hello))
     })
