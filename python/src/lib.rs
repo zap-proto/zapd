@@ -3,9 +3,9 @@
 //! ```python
 //! import zapd
 //! zapd.embed()                                   # stand for router
-//! me = zapd.Node("agent:hanzo-mcp/dgx/42")       # take a seat, keep it
+//! me = zapd.Node("mcp/hanzo-42")                 # take a seat, keep it
 //! me.nodes()                                     # [{"id", "role", "brand", "caps", "attrs"}, ...]
-//! me.call("browser:chromium/dgx/default", body)  # -> bytes
+//! me.call("browser/dgx/chrome-3fa2", body)       # -> bytes
 //! zapd.pair()                                    # the browser's pairing code
 //! ```
 //!

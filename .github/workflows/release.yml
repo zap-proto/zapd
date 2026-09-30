@@ -64,8 +64,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  # The Python binding (`import zapd`): abi3 wheels, one per platform, published
-  # with PyPI trusted publishing (no token in the repo).
+  # The Python binding (`import zapd`): abi3 wheels, one per platform.
   wheels:
     name: wheel ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -90,15 +89,26 @@ jobs:
           name: wheel-${{ matrix.target }}
           path: python/dist/*.whl
 
+  # The index token is Hanzo KMS's, read at publish time with hanzoai/ci's
+  # bin/kms (pinned); the job holds only the KMS machine identity.
   pypi:
     needs: wheels
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with: { pattern: 'wheel-*', merge-multiple: true, path: dist }
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: publish zapd to PyPI
+        env:
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS: https://raw.githubusercontent.com/hanzoai/ci/2fe813158a1e380982c7fc829373d744d7db9be6/bin/kms
+        run: |
+          set -euo pipefail
+          curl -fsSL "$KMS" -o kms
+          token=$(bash kms python-sdk-publish/PYPI_TOKEN prod)
+          echo "::add-mask::$token"
+          ls dist
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$token" pipx run twine upload --skip-existing dist/*.whl
 
   # The crate the Rust hosts (dev, desktop, the IDE) embed — crates.io trusted
   # publishing, no token in the repository.

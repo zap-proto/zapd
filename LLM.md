@@ -22,7 +22,8 @@ Full docs: **README.md**. Design: HIP-0069 (hanzoai/hips).
   anywhere else, or the router in this process loses its seat.
 - **Binary:** `zapd pair [--reset]`, `zapd ls`. It never serves.
 - **Release:** tag `v*` → binaries + npm `@zap-proto/zapd`, abi3 wheels to
-  PyPI `zapd`, crate to crates.io `zapd`. Versions follow the tags (v1.1.1 was
+  PyPI `zapd` (twine; the token is KMS `python-sdk-publish/PYPI_TOKEN`, read
+  with the repo's KMS_CLIENT_ID/SECRET, identity hanzo-ci), crate to crates.io `zapd`. Versions follow the tags (v1.1.1 was
   the last before the library).
 - **Python:** `python/` — PyO3 binding of the same crate (`import zapd`),
   abi3-py310, built with maturin. The one router implementation; do not port it.
