@@ -34,7 +34,9 @@ jobs:
         run: |
           bin=zapd; case "${{ matrix.target }}" in *windows*) bin=zapd.exe ;; esac
           tar -C target/${{ matrix.target }}/release -czf zapd-${{ matrix.target }}.tar.gz "$bin"
-          shasum -a 256 zapd-${{ matrix.target }}.tar.gz > zapd-${{ matrix.target }}.tar.gz.sha256
+          # Git Bash on Windows has sha256sum and no shasum; both print "<hash>  <name>".
+          sum="shasum -a 256"; command -v shasum >/dev/null || sum=sha256sum
+          $sum zapd-${{ matrix.target }}.tar.gz > zapd-${{ matrix.target }}.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: zapd-${{ matrix.target }}
