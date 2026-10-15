@@ -17,6 +17,7 @@ jobs:
           - { os: macos-14,         target: x86_64-apple-darwin,        run: false }  # native cross-compile (LLVM, no QEMU)
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  run: true }   # amd64 native
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, run: true }   # arm64 native
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,     run: true }   # named pipes + LockFileEx, tests/windows.rs
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

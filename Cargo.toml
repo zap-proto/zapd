@@ -3,7 +3,7 @@ members = [".", "python"]
 
 [package]
 name = "zapd"
-version = "1.1.5"
+version = "1.1.6"
 edition = "2021"
 rust-version = "1.81"
 description = "The ZAP router — embedded in every ZAP process; one per user login, elected by lock"
@@ -28,8 +28,6 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tracing = "0.1"
 directories = "5"
-# fcntl(2) record lock (the election) and getuid(2) (the per-user port).
-libc = "0.2"
 # The browser door: a loopback WebSocket, because a browser extension can open
 # nothing else. Handshake only — no TLS, no client connector in the router.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
@@ -39,6 +37,22 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 hmac = "0.13"
 sha2 = "0.11"
 getrandom = "0.4"
+
+# Unix: the fcntl(2) record lock (the election), getuid(2) and gethostname(2).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows: LockFileEx (the election), the pipe's server pid, SIDs and DACLs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }

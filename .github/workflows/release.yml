@@ -19,6 +19,7 @@ jobs:
           - { os: macos-14,         target: x86_64-apple-darwin }        # native cross-compile, no QEMU/macos-13
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,8 +30,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build -p zapd --release --target ${{ matrix.target }}
       - name: package
+        shell: bash
         run: |
-          tar -C target/${{ matrix.target }}/release -czf zapd-${{ matrix.target }}.tar.gz zapd
+          bin=zapd; case "${{ matrix.target }}" in *windows*) bin=zapd.exe ;; esac
+          tar -C target/${{ matrix.target }}/release -czf zapd-${{ matrix.target }}.tar.gz "$bin"
           shasum -a 256 zapd-${{ matrix.target }}.tar.gz > zapd-${{ matrix.target }}.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:

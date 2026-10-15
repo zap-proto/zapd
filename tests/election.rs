@@ -6,6 +6,11 @@
 //! Each candidate is this test binary re-run as the ignored `candidate` test,
 //! with its own `XDG_RUNTIME_DIR` / `XDG_STATE_HOME` so nothing here touches
 //! the real router of the user running the tests.
+//!
+//! Unix only: it reads the fcntl lock and speaks to the socket directly.
+//! `tests/windows.rs` runs the same election through named pipes.
+
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -23,7 +28,10 @@ use tokio_tungstenite::WebSocketStream;
 use zapd::frame::{self, Frame};
 use zapd::pair::{self, Pairing};
 
+/// Our Blink extension: its fixed origin is admitted without pairing.
 const CHROME: &str = "chrome-extension://biingenefmanpecedoafkfajbnlgdmbl";
+/// A per-install random origin: admitted only with the pairing proof.
+const FIREFOX: &str = "moz-extension://6c3a0b3e-1111-2222-3333-444455556666";
 
 /// A router candidate: embed, join as a node, live until stdin closes.
 #[test]
@@ -272,7 +280,7 @@ async fn ws_next(ws: &mut Ws) -> Option<Frame> {
 /// What the extension does: prove the pairing, checking the router's proof
 /// first. Returns the socket, ready for HELLO.
 async fn paired(port: u16, key: &Pairing) -> Option<Ws> {
-    let mut ws = ws_open(port, CHROME).await.ok()?;
+    let mut ws = ws_open(port, FIREFOX).await.ok()?;
     let nc = pair::nonce().unwrap();
     ws_send(&mut ws, Frame::new(frame::AUTH, "", "", nc.to_vec())).await;
     let reply = ws_next(&mut ws).await?;
@@ -450,10 +458,10 @@ async fn door_refuses_strangers() {
             .contains("403")
     );
 
-    // A process that forges our Origin but lacks the key: the router's proof
-    // does not verify under a wrong key, and a guessed client proof is refused.
+    // An origin that must pair, without the key: the router's proof does not
+    // verify under a wrong key, and a guessed client proof is refused.
     let wrong = Pairing { port, key: [8; 32] };
-    let mut ws = ws_open(port, CHROME).await.unwrap();
+    let mut ws = ws_open(port, FIREFOX).await.unwrap();
     let nc = pair::nonce().unwrap();
     ws_send(&mut ws, Frame::new(frame::AUTH, "", "", nc.to_vec())).await;
     let reply = ws_next(&mut ws).await.unwrap();
@@ -485,7 +493,7 @@ async fn door_refuses_strangers() {
     );
 
     // Skipping the proof entirely: HELLO first.
-    let mut ws = ws_open(port, CHROME).await.unwrap();
+    let mut ws = ws_open(port, FIREFOX).await.unwrap();
     ws_send(
         &mut ws,
         Frame::new(
@@ -497,6 +505,11 @@ async fn door_refuses_strangers() {
     )
     .await;
     assert!(ws_next(&mut ws).await.is_none());
+
+    // Our Blink extension's fixed origin is its own proof: HELLO first is welcomed.
+    let mut ws = ws_open(port, CHROME).await.unwrap();
+    let welcome = hello_as(&mut ws, "browser/blink").await.expect("our extension is admitted without pairing");
+    assert_eq!(welcome.typ, frame::WELCOME);
 
     // The key holder gets in — and may answer, but never call another node.
     let (mut ws, _) = browser(port, &home.pairing).await.unwrap();
@@ -638,7 +651,7 @@ async fn a_flood_at_the_door_holds_few_descriptors() {
     // 200 sockets that upgrade and then say nothing — no token, no proof.
     let mut held = Vec::new();
     for _ in 0..200 {
-        if let Ok(ws) = ws_open(port, CHROME).await {
+        if let Ok(ws) = ws_open(port, FIREFOX).await {
             held.push(ws);
         }
     }

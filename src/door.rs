@@ -129,12 +129,12 @@ async fn admit(
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE));
-    // The Err type is tungstenite's upgrade-callback contract, not ours to shrink.
-    #[allow(clippy::result_large_err)]
     // Our Blink extension's fixed origin is its own proof; any other admitted
     // origin still pairs.
     let blink = Arc::new(AtomicBool::new(false));
     let seen = blink.clone();
+    // The Err type is tungstenite's upgrade-callback contract, not ours to shrink.
+    #[allow(clippy::result_large_err)]
     let callback =
         move |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
             let header = |name| req.headers().get(name).and_then(|v| v.to_str().ok());

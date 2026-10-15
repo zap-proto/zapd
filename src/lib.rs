@@ -18,6 +18,7 @@ pub mod pair;
 mod door;
 mod elect;
 mod node;
+mod os;
 mod router;
 
 pub use elect::{embed, runtime_dir, socket_path};

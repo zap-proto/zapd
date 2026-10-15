@@ -7,8 +7,9 @@
 //! id. Hosts never write a reconnect loop of their own.
 //!
 //! A node talks only to the process that holds the router lock: it checks the
-//! socket's peer credentials against the lock, so a socket some other process
-//! bound at the path is refused and retried.
+//! process serving the door (the socket's peer, the pipe's server) against the
+//! lock, so a door some other process made at that address is refused and
+//! retried.
 //!
 //! Calls are one at a time per node, matched by the responder's `from`:
 //! correlation lives in the payload's schema, not the envelope, so the node
@@ -19,7 +20,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::frame::{self, Descriptor, Entry, Frame};
@@ -143,22 +143,22 @@ impl Node {
     }
 }
 
-/// Connect to the router's socket, in a runtime directory that is this user's.
-async fn dial() -> Result<UnixStream> {
-    UnixStream::connect(crate::elect::private_runtime()?.join("zapd.sock")).await
-}
-
-/// One connection's life: HELLO, WELCOME, then answers until it drops.
-async fn session(s: UnixStream, hello: &[u8], inner: &Inner) -> Result<()> {
-    // Talk only to the process that holds the router lock.
-    let peer = s.peer_cred()?.pid().map(|p| p as u32);
+/// Connect to the router's door, in a runtime directory that is this user's,
+/// and only if the process serving it is the one holding the router lock.
+async fn dial() -> Result<crate::os::Dialed> {
+    let (s, peer) = crate::os::dial(&crate::elect::private_runtime()?).await?;
     if peer.is_none() || peer != crate::elect::holder() {
         return Err(Error::new(
             ErrorKind::ConnectionRefused,
-            "the socket is not served by the router lock holder",
+            "the door is not served by the router lock holder",
         ));
     }
-    let (mut rd, mut wr) = s.into_split();
+    Ok(s)
+}
+
+/// One connection's life: HELLO, WELCOME, then answers until it drops.
+async fn session(s: crate::os::Dialed, hello: &[u8], inner: &Inner) -> Result<()> {
+    let (mut rd, mut wr) = tokio::io::split(s);
     wr.write_all(hello).await?;
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer = tokio::spawn(async move {

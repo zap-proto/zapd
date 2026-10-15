@@ -17,6 +17,16 @@ Full docs: **README.md**. Design: HIP-0069 (hanzoai/hips).
   code file `<state>/zap/pair`, 0600, lstat-checked), `node` (a process's seat;
   reconnects 50 ms→1 s; one call at a time, matched by responder `from`; talks
   only to a socket whose peer pid is the lock holder).
+- **Unix and Windows:** everything that differs is `src/os/{unix,windows}.rs`.
+  Windows: the door is the named pipe `\\.\pipe\zapd-<user SID>-<hash of the
+  runtime dir>` with a DACL for the user and SYSTEM; the election is `LockFileEx`
+  on the same lock file; the winner writes `zapd.pid` beside it (LockFileEx names
+  no holder) and a node checks `GetNamedPipeServerProcessId` against it, as a
+  Unix node checks `peer_cred` against `F_GETLK`; private directories get a
+  protected DACL (the `0700` counterpart) and a file is private when its owner is
+  the token's user or owner SID. `tests/windows.rs` runs the election under Wine:
+  `cargo test --target x86_64-pc-windows-gnu --no-run`, copy the exe to evo
+  (x86_64, `wine64` installed), `WINEPREFIX=~/.wine-zapd wine64 <exe>`.
 - **POSIX record locks drop when ANY fd of the file closes.** The lock file is
   opened once per process (`elect::lock_fd`) and never closed; never open it
   anywhere else, or the router in this process loses its seat.

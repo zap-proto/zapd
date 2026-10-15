@@ -12,7 +12,9 @@
 //! Support` on macOS. State, not config: the code pairs this machine's router
 //! with this machine's browsers and means nothing anywhere else, and a config
 //! directory is what people commit and sync as dotfiles. It is `0600` in a
-//! `0700` directory the user owns; before every read both are `lstat`ed, and a
+//! `0700` directory the user owns (on Windows, the directory's DACL admits only
+//! the user and SYSTEM and the file inherits it); before every read both are
+//! checked without following links, and a
 //! symlink, a foreign owner or any group or other permission bit refuses the
 //! door (the UDS still serves) rather than trusting a token someone else could
 //! read or plant. A missing file is minted — a port nothing holds at that
@@ -34,7 +36,6 @@
 //! labels differ so neither proof can be reflected as the other.
 
 use std::io::{Error, ErrorKind, Result, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -138,11 +139,8 @@ pub fn path() -> PathBuf {
 pub fn load() -> Result<Pairing> {
     let p = path();
     let dir = p.parent().expect("pair path has a parent");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    private(dir, true)?;
+    crate::os::make_dir(dir)?;
+    crate::os::private(dir, true)?;
     match read(&p) {
         Err(e) if e.kind() == ErrorKind::NotFound => {
             // Losing a mint race is fine: the winner's code is the one. Any
@@ -178,31 +176,8 @@ pub fn reset() -> Result<Pairing> {
 }
 
 fn read(p: &Path) -> Result<Pairing> {
-    private(p, false)?;
+    crate::os::private(p, false)?;
     Pairing::parse(&std::fs::read_to_string(p)?)
-}
-
-/// Refuse a path anyone but this user could read, write or have planted.
-fn private(p: &Path, dir: bool) -> Result<()> {
-    let m = std::fs::symlink_metadata(p)?;
-    // SAFETY: getuid(2) cannot fail.
-    let me = unsafe { libc::getuid() };
-    let kind_ok = if dir {
-        m.file_type().is_dir()
-    } else {
-        m.file_type().is_file()
-    };
-    if !kind_ok || m.uid() != me || m.mode() & 0o077 != 0 {
-        return Err(Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "zapd: {} must be a {} owned by uid {me} with no group or other access",
-                p.display(),
-                if dir { "directory" } else { "file" }
-            ),
-        ));
-    }
-    Ok(())
 }
 
 fn random() -> Result<[u8; 32]> {
@@ -221,12 +196,7 @@ pub fn nonce() -> Result<[u8; NONCE]> {
 fn publish(p: &Path, pairing: &Pairing, replace: bool) -> Result<()> {
     let dir = p.parent().expect("pair path has a parent");
     let tmp = dir.join(format!(".pair.{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut f = crate::os::create_private(&tmp)?;
     f.write_all(format!("{}\n", pairing.code()).as_bytes())?;
     f.sync_all()?;
     let moved = if replace {
@@ -311,13 +281,16 @@ mod tests {
         assert!(!other.verify(ROUTER, &nc, &ns, &r));
     }
 
+    /// A well-known door port when one is free, else one below every OS's
+    /// ephemeral range; free either way.
     #[test]
     fn a_new_door_port_is_free_and_below_ephemeral() {
         let p = free_port().unwrap();
-        assert!((20000..30000).contains(&p));
+        assert!(WELL_KNOWN.contains(&p) || (20000..30000).contains(&p), "{p}");
         assert!(std::net::TcpListener::bind(("127.0.0.1", p)).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_a_readable_or_planted_token() {
         use std::os::unix::fs::PermissionsExt;
@@ -349,8 +322,40 @@ mod tests {
         assert_eq!(read(&link).unwrap_err().kind(), ErrorKind::PermissionDenied);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
-            private(&dir, true).unwrap_err().kind(),
+            crate::os::private(&dir, true).unwrap_err().kind(),
             ErrorKind::PermissionDenied
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The Windows side of the same rule: the directory is this user's, the
+    /// token in it reads back, a second mint loses, and a link is refused.
+    #[cfg(windows)]
+    #[test]
+    fn a_token_is_this_users_and_minted_once() {
+        let dir = std::env::temp_dir().join(format!("zapd-private-{}", std::process::id()));
+        crate::os::make_dir(&dir).unwrap();
+        crate::os::private(&dir, true).unwrap();
+        let tok = dir.join("pair");
+        let first = Pairing {
+            port: 21000,
+            key: [3; 32],
+        };
+        publish(&tok, &first, false).unwrap();
+        assert_eq!(read(&tok).unwrap(), first);
+        assert!(publish(
+            &tok,
+            &Pairing {
+                port: 21000,
+                key: [4; 32]
+            },
+            false
+        )
+        .is_err());
+        assert_eq!(
+            crate::os::private(&tok, true).unwrap_err().kind(),
+            ErrorKind::PermissionDenied,
+            "a file is not a directory"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

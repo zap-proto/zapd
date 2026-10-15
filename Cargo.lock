@@ -785,7 +785,7 @@ checksum = "ed94fce61571a4006852b7389a063ab983c02eb1bb37b47f8272ce92d06d9538"
 
 [[package]]
 name = "zapd"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "directories",
  "futures-util",
@@ -796,11 +796,12 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "zapd-python"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "pyo3",
  "tracing-subscriber",

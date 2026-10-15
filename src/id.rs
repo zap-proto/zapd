@@ -17,15 +17,7 @@ pub const KINDS: &[&str] = &[
 
 /// This machine's host label.
 pub fn host() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: buf is valid for its length; gethostname NUL-terminates on success.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let raw = if ok {
-        String::from_utf8_lossy(buf.split(|b| *b == 0).next().unwrap_or(&[])).into_owned()
-    } else {
-        String::new()
-    };
-    label(&raw)
+    label(&crate::os::hostname())
 }
 
 fn label(hostname: &str) -> String {

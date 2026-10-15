@@ -10,7 +10,9 @@
 //! The lock is an fcntl(2) record lock, not flock(2): record locks belong to the
 //! process and are not inherited across fork(2). A child forked without exec
 //! (Python multiprocessing, say) therefore never holds the router's lock after
-//! the router is gone and blocks nobody's takeover.
+//! the router is gone and blocks nobody's takeover. On Windows it is
+//! `LockFileEx`, and the door is a named pipe (`os/windows.rs`); what differs
+//! between the two lives in `os` and nowhere else.
 //!
 //! Doors, both owned by the lock holder:
 //!   * `<runtime>/zapd.sock` — the UDS, 0600 in a 0700 directory; every local
@@ -21,18 +23,16 @@
 //!     serving the UDS and retries the port.
 
 use std::fs::File;
-use std::io::{Error, Result};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
+use std::io::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 
 use crate::router::{self, Registry};
-use crate::{door, pair};
+use crate::{door, os, pair};
 
 /// `$XDG_RUNTIME_DIR/zap`, else `~/.zap/run` (macOS has no runtime dir).
 pub fn runtime_dir() -> PathBuf {
@@ -46,37 +46,18 @@ pub fn runtime_dir() -> PathBuf {
     }
 }
 
-/// The UDS every local node connects to.
+/// The door every local node connects to: a Unix socket, or on Windows a named pipe.
 pub fn socket_path() -> PathBuf {
-    runtime_dir().join("zapd.sock")
+    os::address(&runtime_dir())
 }
 
-/// The runtime directory, made and kept private: created `0700` if missing;
-/// refused if it is a symlink or another user's; tightened to `0700` if this
-/// user made it looser. Everything that locks, binds or connects in it goes
-/// through here, so a directory someone else planted is never trusted.
+/// The runtime directory, made and kept private: created if missing; refused
+/// if it is a link or another user's; tightened if this user made it looser.
+/// Everything that locks, binds or connects in it goes through here, so a
+/// directory someone else planted is never trusted.
 pub(crate) fn private_runtime() -> Result<PathBuf> {
     let dir = runtime_dir();
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)?;
-    let m = std::fs::symlink_metadata(&dir)?;
-    // SAFETY: getuid(2) cannot fail.
-    let me = unsafe { libc::getuid() };
-    if !m.file_type().is_dir() || m.uid() != me {
-        return Err(Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "zapd: {} must be a directory owned by uid {me}",
-                dir.display()
-            ),
-        ));
-    }
-    if m.mode() & 0o077 != 0 {
-        tracing::warn!("zapd: {} was open to others; made it 0700", dir.display());
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    }
+    os::private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -91,10 +72,13 @@ pub fn embed() {
             .spawn(|| {
                 let rt = crate::runtime();
                 loop {
-                    if let Err(e) = lock(libc::F_SETLKW, true) {
+                    if let Err(e) = lock_file().and_then(|f| os::lock(f, true)) {
                         tracing::error!("zapd: cannot take the router lock: {e}");
                         std::thread::sleep(Duration::from_secs(1));
                         continue;
+                    }
+                    if let Err(e) = os::announce(&runtime_dir()) {
+                        tracing::error!("zapd: cannot record this router: {e}");
                     }
                     ELECTED.store(true, Ordering::SeqCst);
                     tracing::info!("zapd: elected router (pid {})", std::process::id());
@@ -103,7 +87,7 @@ pub fn embed() {
                     }
                     // Resign so another process can try; then stand again.
                     ELECTED.store(false, Ordering::SeqCst);
-                    let _ = lock(libc::F_SETLK, false);
+                    let _ = lock_file().and_then(|f| os::lock(f, false));
                     std::thread::sleep(Duration::from_secs(1));
                 }
             })
@@ -122,75 +106,38 @@ pub fn holder() -> Option<u32> {
     if ELECTED.load(Ordering::SeqCst) {
         return Some(std::process::id());
     }
-    // SAFETY: a zeroed flock struct is valid; F_GETLK fills it in.
-    let mut l: libc::flock = unsafe { std::mem::zeroed() };
-    l.l_type = libc::F_WRLCK as _;
-    l.l_whence = libc::SEEK_SET as _;
-    let fd = lock_fd().ok()?;
-    // SAFETY: fcntl(F_GETLK) on a valid fd with a valid flock struct.
-    let ok = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut l) } == 0;
-    let unlocked: libc::c_short = libc::F_UNLCK as _;
-    (ok && l.l_type != unlocked).then_some(l.l_pid as u32)
+    os::holder(lock_file().ok()?, &runtime_dir())
 }
 
-/// One open descriptor on `<runtime>/zapd.lock` per process, never closed.
-/// POSIX drops all of a process's record locks on a file when ANY descriptor
-/// of it closes, so opening the file afresh to ask who holds it would release
-/// the lock this very process holds.
-fn lock_fd() -> Result<std::os::unix::io::RawFd> {
-    static FILES: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
+/// One open handle on `<runtime>/zapd.lock` per process, never closed. POSIX
+/// drops all of a process's record locks on a file when ANY descriptor of it
+/// closes, so opening the file afresh to ask who holds it would release the
+/// lock this very process holds.
+fn lock_file() -> Result<&'static File> {
+    static FILES: Mutex<Vec<(PathBuf, &'static File)>> = Mutex::new(Vec::new());
     let path = runtime_dir().join("zapd.lock");
     let mut files = FILES.lock().unwrap();
     if let Some((_, f)) = files.iter().find(|(p, _)| *p == path) {
-        return Ok(f.as_raw_fd());
+        return Ok(f);
     }
     private_runtime()?;
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)?;
-    let fd = f.as_raw_fd();
+    let f: &'static File = Box::leak(Box::new(os::open_lock(&path)?));
     files.push((path, f));
-    Ok(fd)
-}
-
-/// Take (`F_SETLKW`, blocking) or drop the whole-file write lock.
-fn lock(cmd: libc::c_int, take: bool) -> Result<()> {
-    let fd = lock_fd()?;
-    // SAFETY: a zeroed flock struct is valid; we set the fields fcntl reads.
-    let mut l: libc::flock = unsafe { std::mem::zeroed() };
-    l.l_type = if take { libc::F_WRLCK } else { libc::F_UNLCK } as _;
-    l.l_whence = libc::SEEK_SET as _;
-    loop {
-        // SAFETY: fcntl on a valid fd with a valid flock struct.
-        if unsafe { libc::fcntl(fd, cmd, &l) } == 0 {
-            return Ok(());
-        }
-        let e = Error::last_os_error();
-        if e.raw_os_error() != Some(libc::EINTR) {
-            return Err(e);
-        }
-    }
+    Ok(f)
 }
 
 /// Bind the doors and serve until the process exits. Returns only if the UDS
 /// cannot be bound, which resigns the lock.
 async fn serve() -> Result<()> {
-    let path = private_runtime()?.join("zapd.sock");
-    let _ = std::fs::remove_file(&path); // stale: we hold the lock
-    let uds = UnixListener::bind(&path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    tracing::info!("zapd: listening on {}", path.display());
+    let dir = private_runtime()?;
+    let mut doors = os::Listener::bind(&dir)?;
+    tracing::info!("zapd: listening on {}", os::address(&dir).display());
 
     let registry = Registry::new(&crate::host());
     tokio::spawn(browser_door(registry.clone()));
     loop {
-        match uds.accept().await {
-            Ok((stream, _)) => {
+        match doors.accept().await {
+            Ok(stream) => {
                 let registry = registry.clone();
                 tokio::spawn(async move {
                     if let Err(e) = router::handle(stream, registry, true).await {
