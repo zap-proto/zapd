@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release runs this first: nothing ships unless every platform is green.
+  workflow_call:
 
 jobs:
   test:

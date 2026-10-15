@@ -20,12 +20,14 @@ const TARGETS = {
   'darwin-x64': 'x86_64-apple-darwin',
   'linux-x64': 'x86_64-unknown-linux-musl',
   'linux-arm64': 'aarch64-unknown-linux-musl',
+  'win32-x64': 'x86_64-pc-windows-msvc',
 };
+const EXE = process.platform === 'win32' ? 'zapd.exe' : 'zapd';
 
 const key = `${process.platform}-${process.arch}`;
 const target = TARGETS[key];
 if (!target) {
-  console.error(`[zapd] unsupported platform ${key} (darwin/linux × x64/arm64 only)`);
+  console.error(`[zapd] unsupported platform ${key} (darwin/linux × x64/arm64, win32 x64)`);
   process.exit(1);
 }
 
@@ -99,7 +101,7 @@ fetchText(sumUrl, (sumText) => {
     const stageDir = fs.mkdtempSync(path.join(binDir, '.stage-'));
     execFileSync('tar', ['-xzf', tarPath, '-C', stageDir]);
     fs.unlinkSync(tarPath);
-    const staged = path.join(stageDir, 'zapd');
+    const staged = path.join(stageDir, EXE);
     fs.chmodSync(staged, 0o755);
     try {
       execFileSync(staged, ['--version'], { stdio: 'ignore' });
@@ -107,8 +109,8 @@ fetchText(sumUrl, (sumText) => {
       fs.rmSync(stageDir, { recursive: true, force: true });
       fail('staged binary failed --version; aborting install (not swapping in a bad binary)');
     }
-    fs.renameSync(staged, path.join(binDir, 'zapd'));
+    fs.renameSync(staged, path.join(binDir, EXE));
     fs.rmSync(stageDir, { recursive: true, force: true });
-    console.log('[zapd] installed bin/zapd (sha256 verified, atomic)');
+    console.log(`[zapd] installed bin/${EXE} (sha256 verified, atomic)`);
   });
 });

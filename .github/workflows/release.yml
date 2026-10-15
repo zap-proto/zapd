@@ -8,7 +8,12 @@ permissions:
   contents: write
 
 jobs:
+  # Every platform's tests, the same as on main, before anything is built to ship.
+  test:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: test
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -63,14 +68,24 @@ jobs:
         with: { node-version: 20, registry-url: 'https://registry.npmjs.org' }
       - name: publish @zap-proto/zapd (downloads the canonical zap-proto binary)
         working-directory: npm
-        run: |
-          npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
-          npm publish --access public
+        # The npm token is Hanzo KMS's (`NPM_TOKEN`, granted to hanzo-ci), read at
+        # publish time, as @hanzo/mcp's is; the job holds only the KMS identity.
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS: https://raw.githubusercontent.com/hanzoai/ci/2fe813158a1e380982c7fc829373d744d7db9be6/bin/kms
+        run: |
+          set -euo pipefail
+          curl -fsSL "$KMS" -o kms
+          token=$(bash kms NPM_TOKEN prod)
+          echo "::add-mask::$token"
+          rm kms
+          npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+          NODE_AUTH_TOKEN="$token" npm publish --access public
 
   # The Python binding (`import zapd`): abi3 wheels, one per platform.
   wheels:
+    needs: test
     name: wheel ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -115,17 +130,24 @@ jobs:
           ls dist
           TWINE_USERNAME=__token__ TWINE_PASSWORD="$token" pipx run twine upload --skip-existing dist/*.whl
 
-  # The crate the Rust hosts (dev, desktop, the IDE) embed — crates.io trusted
-  # publishing, no token in the repository.
+  # The crate the Rust hosts (dev, desktop, the IDE) embed, published once every
+  # platform is green. The crates.io token is Hanzo KMS's (`CARGO_REGISTRY_TOKEN`,
+  # granted to hanzo-ci), read at publish time; the job holds only the KMS
+  # machine identity, as the PyPI job does.
   crates:
+    needs: test
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
-      - run: cargo publish -p zapd
+      - name: publish zapd to crates.io
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          KMS_CLIENT_ID: ${{ secrets.KMS_CLIENT_ID }}
+          KMS_CLIENT_SECRET: ${{ secrets.KMS_CLIENT_SECRET }}
+          KMS: https://raw.githubusercontent.com/hanzoai/ci/2fe813158a1e380982c7fc829373d744d7db9be6/bin/kms
+        run: |
+          set -euo pipefail
+          curl -fsSL "$KMS" -o kms
+          token=$(bash kms CARGO_REGISTRY_TOKEN prod)
+          echo "::add-mask::$token"
+          CARGO_REGISTRY_TOKEN="$token" cargo publish -p zapd
