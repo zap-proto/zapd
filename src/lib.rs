@@ -21,7 +21,7 @@ mod node;
 mod os;
 mod router;
 
-pub use elect::{embed, runtime_dir, socket_path};
+pub use elect::{embed, holder, runtime_dir, socket_path};
 pub use frame::{Descriptor, Entry};
 pub use id::host;
 pub use node::Node;
