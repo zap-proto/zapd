@@ -6,8 +6,10 @@ of whoever runs the tests is never touched.
 """
 
 import os
+import pathlib
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
@@ -23,7 +25,10 @@ sys.stdin.read()
 
 
 @pytest.fixture
-def home(tmp_path, monkeypatch):
+def home(monkeypatch):
+    # A short directory: pytest's tmp_path on macOS puts the socket past the
+    # 104 bytes a Unix socket path may have there.
+    tmp_path = pathlib.Path(tempfile.mkdtemp(prefix="zapd-", dir="/tmp"))
     (tmp_path / "run").mkdir()
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))

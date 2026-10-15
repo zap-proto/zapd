@@ -8,8 +8,8 @@
 //! and what to prove without the token crossing the wire.
 //!
 //! **The file** `<state>/zap/pair` holds the code and a newline —
-//! `$XDG_STATE_HOME` (default `~/.local/state`) on Linux, `~/Library/Application
-//! Support` on macOS. State, not config: the code pairs this machine's router
+//! `$XDG_STATE_HOME` when set, on any platform; else `~/.local/state` on Linux,
+//! `~/Library/Application Support` on macOS and `%LOCALAPPDATA%` on Windows. State, not config: the code pairs this machine's router
 //! with this machine's browsers and means nothing anywhere else, and a config
 //! directory is what people commit and sync as dotfiles. It is `0600` in a
 //! `0700` directory the user owns (on Windows, the directory's DACL admits only
@@ -126,10 +126,12 @@ pub fn free_port() -> Result<u16> {
     ))
 }
 
-/// `<state>/zap/pair`.
+/// `<state>/zap/pair`: `$XDG_STATE_HOME` when it is set, on every platform, so a
+/// test or a second login can name its own; else the platform's state directory.
 pub fn path() -> PathBuf {
-    let base = directories::BaseDirs::new()
-        .map(|d| d.state_dir().unwrap_or(d.data_local_dir()).to_path_buf());
+    let base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).or_else(|| {
+        directories::BaseDirs::new().map(|d| d.state_dir().unwrap_or(d.data_local_dir()).to_path_buf())
+    });
     base.unwrap_or_else(|| PathBuf::from("."))
         .join("zap")
         .join("pair")
