@@ -24,9 +24,9 @@ Full docs: **README.md**. Design: HIP-0069 (hanzoai/hips).
   no holder) and a node checks `GetNamedPipeServerProcessId` against it, as a
   Unix node checks `peer_cred` against `F_GETLK`; private directories get a
   protected DACL (the `0700` counterpart) and a file is private when its owner is
-  the token's user or owner SID. `tests/windows.rs` runs the election under Wine:
-  `cargo test --target x86_64-pc-windows-gnu --no-run`, copy the exe to evo
-  (x86_64, `wine64` installed), `WINEPREFIX=~/.wine-zapd wine64 <exe>`.
+  the token's user or owner SID. `tests/windows.rs` runs the election on real
+  Windows in CI (`windows-latest`, x86_64-pc-windows-msvc); a local
+  `cargo check --target x86_64-pc-windows-gnu` compiles it. Never Wine.
 - **POSIX record locks drop when ANY fd of the file closes.** The lock file is
   opened once per process (`elect::lock_fd`) and never closed; never open it
   anywhere else, or the router in this process loses its seat.
